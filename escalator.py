@@ -1,15 +1,5 @@
-#!/usr/bin/env python3
-"""Risk Escalation Service client.
-
-Connects to broker.py's --serve-port, reads each smi.risk NDJSON
-record, maps risk_score (0-10) to the contract's riskLevel (1-5) and,
-on every change of that level, POSTs a risk-event to the Risk
-Escalation Service (INSOFTDEV middleware, SPEC-001 v2.2) -- the
-CAMARA-adjacent consumer entity that replaces "the digital twin".
-devices[] is the list of IPv4 addresses ENVELOPE currently reports
-inside the AoI (Devices-in-Area query), since the risk applies to
-whichever device(s) are physically in the risky area, not only the
-sensing bike.
+"""
+    RISK ESCALATION SERVICE CLIENT
 """
 
 import argparse
@@ -24,7 +14,7 @@ from datetime import datetime, timezone
 
 import envelope_location as loc
 
-log = logging.getLogger("dt-client")
+log = logging.getLogger("risk-escalator")
 
 
 def to_risk_level(risk_score):
@@ -190,7 +180,7 @@ def main():
     ap.add_argument("--log-file", default=None,
                     help="append every record received, exactly as it arrived "
                          "(one NDJSON line each), to this file -- e.g. for "
-                         "offline review of env.reasoning/env.score when "
+                         "offline review of env.hazards when "
                          "tuning the LLM prompt; omit to not keep a log")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="DEBUG logging: every record's risk_level, devices-in-area "

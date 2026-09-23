@@ -1,19 +1,17 @@
-#!/usr/bin/env python3
 """
-Startup workflow orchestrator.
+    STARTUP ORCHESTRATOR WORKFLOW
 
-Phase 1 -- area of interest (AoI): health-check the ENVELOPE Devices
-Location APIs (envelope_location.py) and subscribe to it.
+    Phase 1 -- AoI Creation: start with health-check to ENVELOPE Devices
+    Location APIs (envelope_location.py), then create the AoI and subscribe.
 
-Phase 2 -- wait for the sensing bike to enter the AoI: the bike is
-whoever sends the first radar UDP frame to broker.py's --listen-port;
-its source IP is logged as the sensing node found, no separate
-identification protocol needed. Bypassable with --skip-device-detect
-to jump straight to phase 3.
+    Phase 2 -- wait for the sensing bike to appear: the bike is
+    whoever sends the first radar UDP frame to broker.py's --listen-port;
+    its source IP is logged as the sensing node found, supervision is triggered
+    as soon as it enters the AoI (by API subscription callback).
 
-Phase 3 -- supervision: already implemented in broker.py. This script
-launches it unchanged with whatever extra arguments were given on the
-command line.
+    Phase 3 -- supervision: as implemented in broker.py. This script
+    launches it unchanged with whatever extra arguments were given on the
+    command line.
 """
 
 import argparse
@@ -29,13 +27,9 @@ import envelope_location as loc
 log = logging.getLogger("startup")
 
 
-# --------------------------------------------------------------------------
-# Phase 2 -- first radar frame
-# --------------------------------------------------------------------------
-
 def peek_listen_addr(broker_args):
-    """Pull --listen-host/--listen-port out of the args meant for
-    broker.py, without duplicating its full parser (same defaults)."""
+
+    # Take --listen-host/--listen-port from args
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--listen-host", default="0.0.0.0")
     p.add_argument("--listen-port", type=int, default=30490)
@@ -44,32 +38,21 @@ def peek_listen_addr(broker_args):
 
 
 def wait_for_radar_frame(host, port, timeout_s):
-    """
-    Bind broker.py's own UDP ingest port ourselves and wait for the
-    first datagram; its source IP is the sensing node. The socket is
-    closed right after (whether or not one arrived) so broker.py can
-    bind the same port for phase 3 -- that first datagram is consumed
-    here and won't reach broker.py, and any frame sent in the short gap
-    between this closing and broker.py binding is lost, same as any
-    other UDP packet broker.py isn't up yet to receive.
-    """
+
+    # Bind and wait for the first UDP packet to arrive, then return its source IP
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((host, port))
     if timeout_s > 0:
         sock.settimeout(timeout_s)
     try:
         _, (ip, _) = sock.recvfrom(65535)
-        log.info("phase 2: radar frame received from %s -- sensing node found", ip)
+        log.info("Startup Phase 2 Completed: radar frame received from %s -- sensing node found!", ip)
         return ip
     except socket.timeout:
         return None
     finally:
         sock.close()
 
-
-# --------------------------------------------------------------------------
-# Main
-# --------------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(
@@ -107,15 +90,12 @@ def main():
 
     area = loc.area(args.aoi_lat, args.aoi_lon, args.aoi_radius)
 
-    log.info("phase 1: checking ENVELOPE Devices Location APIs health")
+    log.info("Startup Phase 1: checking ENVELOPE Devices Location APIs health...")
     loc.wait_alive()
 
     events, sink, stop = loc.start_receiver(args.notify_port, args.notify_host)
     sub = loc.subscribe(area, sink)
 
-    # Notifications are logged as they arrive (envelope_location.py's
-    # receiver); this just drains the queue so it doesn't grow unbounded
-    # for as long as phase 3 runs. Daemon thread: dies with the process.
     def drain_events():
         while True:
             events.get()
@@ -123,24 +103,24 @@ def main():
 
     try:
         if args.skip_device_detect:
-            log.info("phase 2: skipped (--skip-device-detect)")
+            log.info("Startup Phase 2: skipped (--skip-device-detect)")
         else:
             listen_host, listen_port = peek_listen_addr(broker_args)
-            log.info("phase 2: waiting for the first radar frame on udp://%s:%d",
+            log.info("Startup Phase 2: waiting for the first radar frame on udp://%s:%d",
                      listen_host, listen_port)
             node = wait_for_radar_frame(listen_host, listen_port, args.detect_timeout_s)
             if node is None:
-                log.error("phase 2: no radar frame received within timeout")
+                log.error("Startup Phase 2: no radar frame received within timeout")
                 return 1
 
         broker_py = args.broker_py or os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "broker.py")
-        # broker.py gets the same AoI as the phase 1 subscription, so it can
-        # drop frames from outside it -- one AoI definition, not two.
+
+        # Note: broker.py gets the same AoI as the phase 1 subscription, so it can drop frames from outside it
         aoi_args = ["--aoi-lat", str(args.aoi_lat),
                    "--aoi-lon", str(args.aoi_lon),
                    "--aoi-radius", str(args.aoi_radius)]
-        log.info("phase 3: starting supervision (%s)", broker_py)
+        log.info("Startup Phase 3: starting supervision (%s)...", broker_py)
         result = subprocess.run([sys.executable, broker_py, *aoi_args, *broker_args])
         return result.returncode
     finally:

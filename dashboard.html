@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GuardTwin Debug</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f4f4f2; --surface: #fcfcfb; --surface-2: #efeeea; --border: #dddcd6;
+  --text: #0b0b0b; --text-2: #52514e; --muted: #8a8984;
+  --radar: #2a78d6; --llm: #eb6834; --chan: #1baf7a;
+  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --accent: #2a78d6; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #111110; --surface: #1a1a19; --surface-2: #242422; --border: #34342f;
+    --text: #ffffff; --text-2: #c3c2b7; --muted: #8d8c85;
+    --radar: #3987e5; --llm: #d95926; --chan: #199e70; --accent: #3987e5;
+  }
+  :root:not([data-theme="light"]) .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.85) contrast(.9); }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111110; --surface: #1a1a19; --surface-2: #242422; --border: #34342f;
+  --text: #ffffff; --text-2: #c3c2b7; --muted: #8d8c85;
+  --radar: #3987e5; --llm: #d95926; --chan: #199e70; --accent: #3987e5;
+}
+:root[data-theme="dark"] .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.85) contrast(.9); }
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 14px; background: var(--surface); border-bottom: 1px solid var(--border); }
+header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 650; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-2); background: var(--surface); white-space: nowrap; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.ok { background: var(--good); } .dot.warn { background: var(--warning); } .dot.bad { background: var(--critical); }
+.spacer { flex: 1; }
+button, select, input { font: inherit; color: var(--text); }
+button { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button:hover { border-color: var(--text-2); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: .5; cursor: default; }
+
+main { display: grid; grid-template-columns: minmax(0, 1fr) 400px; grid-template-rows: minmax(360px, 58vh) auto; gap: 10px; padding: 10px; }
+#map { grid-column: 1; grid-row: 1; border-radius: 8px; border: 1px solid var(--border); min-height: 360px; }
+#side { grid-column: 2; grid-row: 1 / span 2; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+#bottom { grid-column: 1; grid-row: 2; min-width: 0; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; min-width: 0; }
+.card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-2); margin: 0 0 8px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.card h2 .right { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--muted); }
+.muted { color: var(--muted); } .small { font-size: 12px; }
+
+/* Risk */
+.risk-head { display: flex; align-items: baseline; gap: 10px; }
+.risk-score { font-size: 34px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1; }
+.risk-score small { font-size: 14px; color: var(--muted); font-weight: 400; }
+.level { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.comp { display: grid; grid-template-columns: 10px 1fr 44px; align-items: center; gap: 4px 8px; margin-top: 8px; }
+.sw { width: 10px; height: 10px; border-radius: 3px; }
+.comp .name { color: var(--text-2); } .comp .val { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.bar { grid-column: 2 / span 2; height: 6px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
+.bar > div { height: 100%; border-radius: 4px; transition: width .2s; }
+.legend { display: flex; gap: 12px; flex-wrap: wrap; margin: 10px 0 4px; color: var(--text-2); font-size: 12px; }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+#chartWrap { position: relative; height: 130px; }
+#chart { width: 100%; height: 100%; display: block; }
+#tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.15); display: none; white-space: nowrap; z-index: 5; }
+
+/* lists */
+.hz { border-top: 1px solid var(--border); padding: 6px 0; }
+.hz:first-child { border-top: 0; }
+.hz .t { font-weight: 600; }
+.chip { display: inline-block; padding: 0 6px; border-radius: 4px; background: var(--surface-2); color: var(--text-2); font-size: 11px; margin-left: 4px; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; }
+.kv div:nth-child(odd) { color: var(--muted); }
+details { margin-top: 4px; } summary { cursor: pointer; color: var(--text-2); }
+pre.json { font: 11px/1.35 var(--mono); background: var(--surface-2); padding: 6px; border-radius: 6px; overflow: auto; max-height: 180px; margin: 4px 0; }
+.warnbox { border-left: 3px solid var(--warning); background: var(--surface-2); padding: 6px 8px; border-radius: 4px; margin-top: 6px; }
+
+/* bottom tabs */
+.tabs { display: flex; gap: 4px; margin-bottom: -1px; }
+.tab { border: 1px solid var(--border); border-bottom: 0; border-radius: 8px 8px 0 0; background: var(--surface-2); padding: 5px 14px; cursor: pointer; color: var(--text-2); }
+.tab.on { background: var(--surface); color: var(--text); font-weight: 600; }
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 0 8px 8px 8px; padding: 10px 12px; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; border-right: 1px solid var(--border); background: var(--surface); }
+.seg button:last-child { border-right: 0; }
+.seg button.on { background: var(--accent); color: #fff; }
+.toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+#logbox { font: 12px/1.45 var(--mono); height: 36vh; min-height: 220px; overflow: auto; background: var(--surface-2); border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; word-break: break-all; }
+.ll { display: grid; grid-template-columns: 76px 64px 1fr; gap: 8px; }
+.ll .src { color: var(--muted); } .ll .ts { color: var(--muted); }
+.ll.warn .msg::before { content: "⚠ "; color: var(--warning); }
+.ll.err .msg::before { content: "✖ "; color: var(--critical); }
+.ll.err .msg { color: var(--critical); }
+
+/* settings */
+.sgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+fieldset { border: 1px solid var(--border); border-radius: 8px; margin: 0; padding: 8px 10px; }
+legend { color: var(--text-2); font-weight: 600; padding: 0 4px; }
+.field { display: grid; gap: 2px; margin: 6px 0; }
+.field label { color: var(--text-2); font-size: 12px; }
+.field input[type=text], .field input[type=password], .field input[type=datetime-local] { width: 100%; padding: 4px 6px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface); }
+.field.dirty input { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.field .err { color: var(--critical); font-size: 12px; }
+.field .row { display: flex; gap: 6px; align-items: center; }
+.check { display: flex; gap: 6px; align-items: center; margin: 6px 0; }
+
+/* map icons */
+.bike-icon svg { overflow: visible; }
+.hz-icon { width: 14px; height: 14px; transform: rotate(45deg); border: 2px solid #fff; border-radius: 2px; box-shadow: 0 0 0 1px rgba(0,0,0,.35); }
+.leaflet-container { font: inherit; background: var(--surface-2); }
+
+@media (max-width: 1000px) {
+  main { grid-template-columns: 1fr; grid-template-rows: auto; }
+  #map { grid-column: 1; grid-row: auto; height: 55vh; }
+  #side, #bottom { grid-column: 1; grid-row: auto; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>GuardTwin debug</h1>
+  <span class="pill" id="pTap"><span class="dot"></span><span>broker stream</span></span>
+  <span class="pill" id="pVllm"><span class="dot"></span><span>vLLM</span></span>
+  <span class="pill" id="pEnv"><span class="dot"></span><span>ENVELOPE</span></span>
+  <span class="pill" id="pC_broker"><span class="dot"></span><span>broker</span></span>
+  <span class="pill" id="pC_escalator"><span class="dot"></span><span>escalator</span></span>
+  <span class="pill" id="pC_vllm"><span class="dot"></span><span>vllm</span></span>
+  <span class="pill" id="pJob" hidden><span class="dot"></span><span></span></span>
+  <span class="spacer"></span>
+  <label class="small muted"><input type="checkbox" id="follow" checked> follow bike</label>
+  <button id="theme" title="Toggle light/dark">◐</button>
+</header>
+
+<main>
+  <div id="map"></div>
+
+  <div id="side">
+    <section class="card">
+      <h2>Risk score <span class="right" id="riskAge"></span></h2>
+      <div class="risk-head">
+        <div class="risk-score" id="score">–<small> / 10</small></div>
+        <div class="level" id="level"></div>
+      </div>
+      <div class="comp" id="comps"></div>
+      <div class="legend">
+        <span><i class="sw" style="background:var(--radar)"></i>Radar (deterministic)</span>
+        <span><i class="sw" style="background:var(--chan)"></i>Channel penalty</span>
+        <span><i class="sw" style="background:var(--llm)"></i>AI environment (LLM)</span>
+      </div>
+      <div id="chartWrap"><canvas id="chart" aria-label="Risk score components over the last 2 minutes, stacked"></canvas><div id="tip"></div></div>
+      <div class="small muted">Last 2 minutes, stacked: the top edge is the total before the 10-point cap.</div>
+    </section>
+
+    <section class="card">
+      <h2>AI environment (LLM) <span class="right" id="envState"></span></h2>
+      <div id="hazards" class="small"></div>
+      <div id="geomWarn"></div>
+    </section>
+
+    <section class="card">
+      <h2>Channel &amp; bike</h2>
+      <div class="kv small" id="chan"></div>
+    </section>
+
+    <section class="card">
+      <h2>Devices in area (ENVELOPE) <span class="right" id="devAge"></span></h2>
+      <div id="devices" class="small"></div>
+      <h2 style="margin-top:10px">Callbacks received <span class="right" id="cbCount"></span></h2>
+      <div id="callbacks" class="small"></div>
+    </section>
+  </div>
+
+  <div id="bottom">
+    <div class="tabs">
+      <div class="tab on" data-tab="logs">Logs</div>
+      <div class="tab" data-tab="settings">Settings</div>
+    </div>
+    <div class="panel" id="tab-logs">
+      <div class="toolbar">
+        <div class="seg" id="srcSeg">
+          <button data-src="" class="on">All</button>
+          <button data-src="broker">Broker</button>
+          <button data-src="escalator">Escalator</button>
+          <button data-src="vllm">vLLM</button>
+          <button data-src="compose">Compose runs</button>
+        </div>
+        <input type="text" id="logFilter" placeholder="filter text…" style="padding:4px 6px;border:1px solid var(--border);border-radius:5px;background:var(--surface);min-width:180px">
+        <label class="small"><input type="checkbox" id="autoscroll" checked> auto-scroll</label>
+        <label class="small"><input type="checkbox" id="hideMetrics" checked> hide vLLM metrics lines</label>
+        <button id="logClear">Clear view</button>
+      </div>
+      <div id="logbox"></div>
+    </div>
+    <div class="panel" id="tab-settings" hidden>
+      <div class="toolbar">
+        <button id="editAoi">Edit AoI on map</button>
+        <label class="small"><input type="checkbox" id="rebuild"> rebuild the image (after code changes)</label>
+        <span class="spacer"></span>
+        <button id="revert">Revert</button>
+        <button class="primary" id="apply">Apply &amp; restart broker + escalator</button>
+      </div>
+      <div id="applyMsg" class="small"></div>
+      <div class="sgrid" id="sgrid"></div>
+      <p class="small muted">Values go to <code>.env</code> next to <code>docker-compose.yml</code>; an empty field means the compose default (shown as placeholder). vLLM is never restarted from here.</p>
+    </div>
+  </div>
+</main>
+
+<script>
+"use strict";
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const M = 111320;
+const LEVEL = {none: ["good", "None"], low: ["good", "Low"], medium: ["warning", "Medium"], high: ["serious", "High"], critical: ["critical", "Critical"]};
+
+/* ---------------- theme ---------------- */
+$("#theme").onclick = () => {
+  const cur = document.documentElement.dataset.theme ||
+    (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  document.documentElement.dataset.theme = cur === "dark" ? "light" : "dark";
+  try { localStorage.setItem("gt-theme", document.documentElement.dataset.theme); } catch (e) {}
+  drawChart();
+};
+try { const t = localStorage.getItem("gt-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+
+/* ---------------- map ---------------- */
+const map = L.map("map", {zoomControl: true}).setView([45.0641, 7.6598], 17);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 20, maxNativeZoom: 19, attribution: "© OpenStreetMap contributors"}).addTo(map);
+const layers = {
+  aoi: L.layerGroup().addTo(map), coverage: L.layerGroup().addTo(map), geometry: L.layerGroup(),
+  trail: L.layerGroup().addTo(map), objects: L.layerGroup().addTo(map),
+  hazards: L.layerGroup().addTo(map), bike: L.layerGroup().addTo(map),
+};
+L.control.layers(null, {
+  "AoI": layers.aoi, "Geometry coverage": layers.coverage, "Site geometry (LLM's map)": layers.geometry,
+  "Bike trail": layers.trail, "Radar objects": layers.objects, "LLM hazards": layers.hazards,
+}, {collapsed: true}).addTo(map);
+
+let aoiCircle = null, draft = null, geomBBox = null, geomLoaded = false;
+const trail = L.polyline([], {color: css("--text-2"), weight: 2, opacity: .6}).addTo(layers.trail);
+const bikeIcon = h => L.divIcon({className: "bike-icon", iconSize: [26, 26], iconAnchor: [13, 13],
+  html: `<svg width="26" height="26" viewBox="-13 -13 26 26" style="transform:rotate(${h ?? 0}deg)">
+    <circle r="10" fill="${css("--text")}" stroke="#fff" stroke-width="2"/>
+    ${h == null ? "" : `<path d="M0,-8 L5,5 L0,2 L-5,5 Z" fill="#fff"/>`}</svg>`});
+let bike = null, askedMarker = null, lastHazKey = "", firstFix = true;
+
+map.on("overlayadd", e => { if (e.layer === layers.geometry && !geomLoaded) loadGeometry(); });
+function loadGeometry() {
+  geomLoaded = true;
+  fetch("/geometry.geojson").then(r => r.json()).then(doc => {
+    L.geoJSON(doc, {
+      style: f => (f.geometry.type === "Polygon" || f.geometry.type === "MultiPolygon")
+        ? {color: css("--muted"), weight: 1, fillOpacity: .15}
+        : {color: css("--muted"), weight: f.properties.highway ? 2 : 1, opacity: .8},
+      pointToLayer: (f, ll) => L.circleMarker(ll, {radius: 2, color: css("--muted"), weight: 1}),
+      onEachFeature: (f, l) => {
+        const p = f.properties || {};
+        const name = p.name || p.highway || p.amenity || (p.building ? "building" : "") || p.railway || "";
+        if (name) l.bindTooltip(esc(name), {sticky: true});
+      },
+    }).addTo(layers.geometry);
+  });
+}
+
+function drawAoi(s) {
+  layers.aoi.clearLayers();
+  const lat = +s.AOI_LAT, lon = +s.AOI_LON, r = +s.AOI_RADIUS;
+  if (!isFinite(lat) || !isFinite(lon)) return;
+  aoiCircle = L.circle([lat, lon], {radius: r, color: css("--accent"), weight: 2, fillOpacity: .04})
+    .bindTooltip(`AoI (applied): r ${r} m`).addTo(layers.aoi);
+  if (firstFix) map.setView([lat, lon], 17);
+}
+function drawCoverage() {
+  layers.coverage.clearLayers();
+  if (geomBBox) L.rectangle(geomBBox, {color: css("--muted"), weight: 1, dashArray: "4 4", fill: false})
+    .bindTooltip("Site geometry coverage: the LLM sees no map outside this box").addTo(layers.coverage);
+}
+function circleInBox(lat, lon, r, box) {
+  if (!box) return true;
+  const dLat = r / M, dLon = r / (M * Math.cos(lat * Math.PI / 180));
+  return lat - dLat >= box[0][0] && lat + dLat <= box[1][0] && lon - dLon >= box[0][1] && lon + dLon <= box[1][1];
+}
+
+/* AoI editing on the map: draggable center + radius handle, synced to the form */
+function startDraft() {
+  const lat = +effVal("AOI_LAT"), lon = +effVal("AOI_LON"), r = +effVal("AOI_RADIUS") || 150;
+  const handleAt = (la, lo, rr) => [la, lo + rr / (M * Math.cos(la * Math.PI / 180))];
+  const ring = L.circle([lat, lon], {radius: r, color: css("--llm"), weight: 2, dashArray: "6 6", fillOpacity: .06}).addTo(map);
+  const knob = (html) => L.divIcon({className: "", iconSize: [16, 16], iconAnchor: [8, 8],
+    html: `<div style="width:16px;height:16px;border-radius:50%;background:${css("--llm")};border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.4)">${html}</div>`});
+  const center = L.marker([lat, lon], {draggable: true, icon: knob(""), title: "Drag to move the AoI"}).addTo(map);
+  const handle = L.marker(handleAt(lat, lon, r), {draggable: true, icon: knob(""), title: "Drag to resize"}).addTo(map);
+  center.on("drag", () => {
+    const c = center.getLatLng(), rr = ring.getRadius();
+    ring.setLatLng(c); handle.setLatLng(handleAt(c.lat, c.lng, rr));
+    setField("AOI_LAT", c.lat.toFixed(7)); setField("AOI_LON", c.lng.toFixed(7));
+  });
+  handle.on("drag", () => {
+    const rr = Math.max(10, Math.round(map.distance(center.getLatLng(), handle.getLatLng())));
+    ring.setRadius(rr); setField("AOI_RADIUS", String(rr));
+  });
+  map.on("click", onMapClick);
+  function onMapClick(e) { center.setLatLng(e.latlng); center.fire("drag"); }
+  draft = {ring, center, handle, stop() { map.off("click", onMapClick); [ring, center, handle].forEach(l => l.remove()); draft = null; },
+           sync() {
+             const la = +effVal("AOI_LAT"), lo = +effVal("AOI_LON"), rr = +effVal("AOI_RADIUS");
+             if (!isFinite(la) || !isFinite(lo) || !(rr > 0)) return;
+             ring.setLatLng([la, lo]); ring.setRadius(rr); center.setLatLng([la, lo]); handle.setLatLng(handleAt(la, lo, rr));
+           }};
+  $("#editAoi").textContent = "Stop editing on map";
+  map.fitBounds(ring.getBounds().pad(.3));
+}
+$("#editAoi").onclick = () => {
+  if (draft) { draft.stop(); $("#editAoi").textContent = "Edit AoI on map"; }
+  else { showTab("settings"); startDraft(); }
+};
+
+function drawBike(rec) {
+  const ego = rec.ego || {};
+  if (!ego.pos || ego.pos[0] == null) return;
+  const ll = L.latLng(ego.pos[0], ego.pos[1]);
+  if (!bike) bike = L.marker(ll, {icon: bikeIcon(ego.heading_deg), zIndexOffset: 1000}).addTo(layers.bike);
+  else { bike.setLatLng(ll); bike.setIcon(bikeIcon(ego.heading_deg)); }
+  bike.bindTooltip(`Bike · ${ego.speed_mps ?? "–"} m/s · heading ${ego.heading_deg != null ? Math.round(ego.heading_deg) + "°" : "–"}${ego.sim ? " · simulated" : ""}`);
+  trail.addLatLng(ll);
+  const pts = trail.getLatLngs(); if (pts.length > 600) trail.setLatLngs(pts.slice(-600));
+  if ($("#follow").checked && !draft) {
+    if (firstFix) { map.setView(ll, 18); firstFix = false; }
+    else if (!map.getBounds().pad(-0.25).contains(ll)) map.panTo(ll);
+  }
+}
+function drawObjects(rec) {
+  layers.objects.clearLayers();
+  const objs = rec.objects || (rec.threats || []).map(t => ({cls: t.cls, pos: t.pos, risk: t.risk, appr: t.appr}));
+  for (const o of objs) {
+    if (!o.pos) continue;
+    L.circleMarker(o.pos, {radius: 5 + Math.min(8, (o.risk || 0)), color: "#fff", weight: 2,
+      fillColor: css("--radar"), fillOpacity: o.static ? .35 : .9})
+      .bindTooltip(`${esc(o.cls || "?")} · object risk ${o.risk ?? "–"}/10${o.appr ? " · approaching" : ""}${o.static ? " · static" : ""}`)
+      .addTo(layers.objects);
+  }
+}
+function drawHazards(env) {
+  const hz = (env && env.hazards) || [];
+  const key = JSON.stringify([hz, env && env.asked_pos]);
+  if (key === lastHazKey) return;
+  lastHazKey = key;
+  layers.hazards.clearLayers();
+  for (const h of hz) {
+    if (!h.pos) continue;
+    L.marker(h.pos, {icon: L.divIcon({className: "", iconSize: [14, 14], iconAnchor: [7, 7],
+      html: `<div class="hz-icon" style="background:${css("--llm")}"></div>`})})
+      .bindTooltip(`<b>${esc(h.type)}</b> · ${esc(h.severity)} · ${esc(h.activity || "")}<br>${esc(h.evidence)}<br><span style="opacity:.7">${esc(h.feature)}</span>`)
+      .addTo(layers.hazards);
+  }
+  if (env && env.asked_pos) {
+    L.circleMarker(env.asked_pos, {radius: 7, color: css("--llm"), weight: 2, fill: false, dashArray: "3 3"})
+      .bindTooltip("Pose the LLM was asked about (lookahead)").addTo(layers.hazards);
+  }
+}
+
+/* ---------------- risk panel + chart ---------------- */
+let history = []; // [t, radar, llm, chan, total]
+const COMPS = [
+  ["radar_risk", "Radar (deterministic)", "--radar"],
+  ["ai_env_risk", "AI environment (LLM)", "--llm"],
+  ["chan_penalty", "Channel penalty", "--chan"],
+];
+function renderRisk(st) {
+  const rec = st.record;
+  if (!rec) { $("#score").innerHTML = `–<small> / 10</small>`; return; }
+  $("#score").innerHTML = `${(+rec.risk_score).toFixed(1)}<small> / 10</small>`;
+  const [cls, label] = LEVEL[rec.risk_level] || ["", rec.risk_level];
+  $("#level").innerHTML = `<span class="dot" style="background:var(--${cls})"></span>${esc(label)}`;
+  $("#comps").innerHTML = COMPS.map(([k, name, c]) => {
+    const v = +rec[k] || 0;
+    return `<i class="sw" style="background:var(${c})"></i><span class="name">${name}</span><span class="val">${v.toFixed(1)}</span>
+      <div class="bar"><div style="width:${Math.min(100, v * 10)}%;background:var(${c})"></div></div>`;
+  }).join("");
+  $("#riskAge").textContent = `seq ${rec.seq ?? "–"} · ${st.record_age_s ?? "–"} s ago · ${st.fps.toFixed(1)} fps`;
+}
+
+const canvas = $("#chart"), tip = $("#tip");
+let hoverX = null;
+function drawChart() {
+  const dpr = devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  if (!w) return;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const g = canvas.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  const L0 = 26, R0 = 6, T0 = 6, B0 = 16, pw = w - L0 - R0, ph = h - T0 - B0;
+  const now = Date.now() / 1000, span = 120;
+  const X = t => L0 + pw * (1 - (now - t) / span), Y = v => T0 + ph * (1 - Math.min(10, v) / 10);
+  g.font = "11px system-ui, sans-serif"; g.fillStyle = css("--muted"); g.strokeStyle = css("--border"); g.lineWidth = 1;
+  for (const v of [0, 5, 10]) {
+    g.beginPath(); g.moveTo(L0, Y(v) + .5); g.lineTo(w - R0, Y(v) + .5); g.stroke();
+    g.textAlign = "right"; g.fillText(String(v), L0 - 5, Y(v) + 4);
+  }
+  g.textAlign = "left"; g.fillText("-2 min", L0, h - 3); g.textAlign = "right"; g.fillText("now", w - R0, h - 3);
+  const pts = history.filter(p => now - p[0] <= span);
+  if (pts.length < 2) return;
+  // stack order bottom -> top: radar, channel penalty, LLM
+  const stack = pts.map(p => { const a = p[1], b = a + p[3], c = b + p[2]; return [p[0], a, b, c]; });
+  const bands = [[0, 1, "--radar"], [1, 2, "--chan"], [2, 3, "--llm"]];
+  for (const [lo, hi, col] of bands) {
+    g.beginPath();
+    stack.forEach((s, i) => { const x = X(s[0]), y = Y(s[hi]); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+    for (let i = stack.length - 1; i >= 0; i--) g.lineTo(X(stack[i][0]), lo ? Y(stack[i][lo]) : Y(0));
+    g.closePath(); g.fillStyle = css(col); g.fill();
+    // 2px surface gap between the bands
+    g.beginPath(); stack.forEach((s, i) => { const x = X(s[0]), y = Y(s[hi]); i ? g.lineTo(x, y) : g.moveTo(x, y); });
+    g.strokeStyle = css("--surface"); g.lineWidth = 2; g.stroke();
+  }
+  if (hoverX != null && hoverX >= L0 && hoverX <= w - R0) {
+    const t = now - span * (1 - (hoverX - L0) / pw);
+    let best = pts[0]; for (const p of pts) if (Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p;
+    const x = X(best[0]);
+    g.strokeStyle = css("--text-2"); g.lineWidth = 1; g.beginPath(); g.moveTo(x + .5, T0); g.lineTo(x + .5, T0 + ph); g.stroke();
+    tip.style.display = "block";
+    tip.innerHTML = `<b>${(best[4]).toFixed(1)}</b> total · ${Math.round(now - best[0])} s ago<br>
+      <i class="sw" style="display:inline-block;background:var(--radar)"></i> Radar ${best[1].toFixed(1)}<br>
+      <i class="sw" style="display:inline-block;background:var(--chan)"></i> Channel ${best[3].toFixed(1)}<br>
+      <i class="sw" style="display:inline-block;background:var(--llm)"></i> LLM ${best[2].toFixed(1)}`;
+    const tw = tip.offsetWidth;
+    tip.style.left = (x + 10 + tw > w ? x - tw - 10 : x + 10) + "px"; tip.style.top = "4px";
+  } else tip.style.display = "none";
+}
+canvas.addEventListener("mousemove", e => { hoverX = e.offsetX; drawChart(); });
+canvas.addEventListener("mouseleave", () => { hoverX = null; drawChart(); });
+addEventListener("resize", drawChart);
+
+function renderEnv(rec, settings) {
+  const env = rec && rec.env;
+  if (!env) { $("#hazards").innerHTML = `<span class="muted">No record yet.</span>`; $("#envState").textContent = ""; return; }
+  $("#envState").textContent = `${env.state}${env.age_s != null ? " · " + env.age_s + " s old" : ""} · +${(+rec.ai_env_risk).toFixed(1)} pts`;
+  const hz = env.hazards || [];
+  $("#hazards").innerHTML = hz.length ? hz.map(h => `<div class="hz">
+      <span class="t">${esc(h.type.replace("_", " "))}</span><span class="chip">${esc(h.severity)}</span><span class="chip">${esc(h.activity || "normal")}</span><span class="chip">${esc(h.group)} · ${esc(h.direction)}</span>
+      <div>${esc(h.evidence)}</div><div class="muted">${esc(h.feature)}</div></div>`).join("")
+    : `<span class="muted">${env.state === "ok" ? "No hazards reported for this stretch." : "No valid result (" + esc(env.state) + ")."}</span>`;
+}
+
+function renderChan(rec) {
+  if (!rec) return;
+  const c = rec.channel || {}, e = rec.ego || {};
+  $("#chan").innerHTML = [
+    ["IMSI", c.imsi], ["ranUeNgapID", c.ue_id], ["Channel score", c.score != null ? c.score + " / 10" : "–"], ["Channel state", c.state],
+    ["Bike position", e.pos ? e.pos.map(v => (+v).toFixed(6)).join(", ") : "no fix"],
+    ["Speed · heading", `${e.speed_mps ?? "–"} m/s · ${e.heading_deg != null ? Math.round(e.heading_deg) + "°" : "–"}${e.sim ? " (simulated)" : ""}`],
+    ["Radar objects", `${rec.n_obj ?? 0} (${(rec.threats || []).length} threats)`],
+  ].map(([k, v]) => `<div>${k}</div><div>${esc(v ?? "–")}</div>`).join("");
+}
+
+function renderDevices(st) {
+  const d = st.devices || {};
+  $("#devAge").textContent = d.t ? `${Math.round(st.now - d.t)} s ago · maxAge ${d.max_age_s ?? "–"} s` : "";
+  if (d.error) $("#devices").innerHTML = `<div class="warnbox">Query failed: ${esc(d.error)}</div>`;
+  else if (!(d.devices || []).length) $("#devices").innerHTML = `<span class="muted">No device in the AoI.</span>`;
+  else $("#devices").innerHTML = d.devices.map(dev => {
+    const ip = dev.ipv4Address || {};
+    return `<div class="hz"><span class="t">${esc(dev.hostname || ip.publicAddress || "device")}</span>
+      <span class="chip">${esc([ip.publicAddress, ip.privateAddress, ip.publicPort].filter(x => x != null).join(" · "))}</span>
+      <details><summary>raw</summary><pre class="json">${esc(JSON.stringify(dev, null, 1))}</pre></details></div>`;
+  }).join("");
+  const n = st.notifications || [];
+  $("#cbCount").textContent = n.length ? `${n.length} (latest first)` : "";
+  $("#callbacks").innerHTML = n.length ? n.slice().reverse().map(x => `<details><summary>${esc(x.ts.slice(11, 19))} from ${esc(x.from)} · ${esc(summarize(x.event))}</summary>
+      <pre class="json">${esc(typeof x.event === "string" ? x.event : JSON.stringify(x.event, null, 1))}</pre></details>`).join("")
+    : `<span class="muted">None since the broker started (they come from its logs).</span>`;
+}
+function summarize(ev) {
+  if (!ev || typeof ev !== "object") return String(ev).slice(0, 60);
+  const t = ev.type || ev.eventType || (ev.data && ev.data.type) || "";
+  return String(t || Object.keys(ev).slice(0, 3).join(", ")).split(".").pop();
+}
+
+function setPill(id, cls, text, title) {
+  const el = $("#" + id); if (!el) return;
+  el.hidden = false; el.querySelector(".dot").className = "dot " + cls;
+  el.querySelector("span:last-child").textContent = text; el.title = title || "";
+}
+function renderPills(st) {
+  const tap = st.tap || {};
+  setPill("pTap", tap.connected ? (st.record_age_s != null && st.record_age_s < 3 ? "ok" : "warn") : "bad",
+    tap.connected ? `broker stream · ${st.fps.toFixed(1)} fps` : "broker stream · down", tap.error || "");
+  setPill("pVllm", st.health.vllm ? "ok" : st.health.vllm === false ? "bad" : "", "vLLM");
+  setPill("pEnv", st.health.envelope ? "ok" : st.health.envelope === false ? "bad" : "", "ENVELOPE");
+  for (const svc of ["broker", "escalator", "vllm"]) {
+    const c = (st.containers || {})[svc];
+    if (!c) continue;
+    setPill("pC_" + svc, c.state === "running" ? "ok" : c.state === "missing" ? "" : "bad", `${svc}: ${c.state}`, c.status);
+  }
+  const j = st.job || {};
+  if (j.cmd) setPill("pJob", j.running ? "warn" : j.rc === 0 ? "ok" : "bad",
+    j.running ? "compose: running…" : `compose: exit ${j.rc}`, j.cmd);
+}
+
+/* ---------------- live stream ---------------- */
+let settingsCache = null;
+function connect() {
+  const es = new EventSource("/api/stream");
+  es.addEventListener("hello", e => {
+    const h = JSON.parse(e.data);
+    history = h.history; trail.setLatLngs(h.trail);
+  });
+  es.addEventListener("state", e => {
+    const st = JSON.parse(e.data), rec = st.record;
+    if (rec) {
+      const last = history[history.length - 1];
+      const t = st.now - (st.record_age_s || 0);
+      if (!last || t - last[0] >= 0.5) history.push([t, +rec.radar_risk || 0, +rec.ai_env_risk || 0, +rec.chan_penalty || 0, +rec.risk_score || 0]);
+      if (history.length > 700) history = history.slice(-600);
+      drawBike(rec); drawObjects(rec); drawHazards(rec.env);
+    }
+    renderRisk(st); renderEnv(rec, settingsCache); renderChan(rec); renderDevices(st); renderPills(st);
+    drawChart();
+    if (j_prev_running && !(st.job || {}).running) { loadSettings(); }
+    j_prev_running = !!(st.job || {}).running;
+  });
+  es.onerror = () => setPill("pTap", "bad", "dashboard disconnected", "retrying…");
+}
+let j_prev_running = false;
+
+/* ---------------- logs ---------------- */
+let logSrc = "", logSeq = -1, logTimer = null;
+const logbox = $("#logbox");
+async function pollLogs() {
+  try {
+    const r = await fetch(`/api/logs?after=${logSeq}&src=${logSrc}&limit=${logSeq < 0 ? 800 : 1500}`);
+    const d = await r.json();
+    const filt = $("#logFilter").value.toLowerCase(), hideM = $("#hideMetrics").checked;
+    const frag = document.createDocumentFragment();
+    for (const [seq, src, ts, msg] of d.lines) {
+      logSeq = Math.max(logSeq, seq);
+      if (hideM && src === "vllm" && /loggers\.py|GET \/(health|metrics)/.test(msg)) continue;
+      if (filt && !msg.toLowerCase().includes(filt)) continue;
+      const div = document.createElement("div");
+      const lvl = /\b(ERROR|CRITICAL|Traceback)\b/.test(msg) ? " err" : /\bWARN(ING)?\b/.test(msg) ? " warn" : "";
+      div.className = "ll" + lvl;
+      div.innerHTML = `<span class="src">${esc(src)}</span><span class="ts">${esc(ts ? new Date(ts).toLocaleTimeString([], {hour12: false}) : "")}</span><span class="msg">${esc(msg)}</span>`;
+      frag.appendChild(div);
+    }
+    if (logSeq < 0) logSeq = d.seq;
+    logbox.appendChild(frag);
+    while (logbox.childElementCount > 2500) logbox.firstChild.remove();
+    if ($("#autoscroll").checked) logbox.scrollTop = logbox.scrollHeight;
+  } catch (e) {}
+  logTimer = setTimeout(pollLogs, 1000);
+}
+function resetLogs() { clearTimeout(logTimer); logbox.textContent = ""; logSeq = -1; pollLogs(); }
+$("#srcSeg").onclick = e => {
+  const b = e.target.closest("button"); if (!b) return;
+  for (const x of $("#srcSeg").children) x.classList.toggle("on", x === b);
+  logSrc = b.dataset.src; resetLogs();
+};
+$("#logFilter").addEventListener("input", () => { clearTimeout(window._lf); window._lf = setTimeout(resetLogs, 300); });
+$("#hideMetrics").onchange = resetLogs;
+$("#logClear").onclick = () => { logbox.textContent = ""; };
+
+/* ---------------- tabs ---------------- */
+function showTab(name) {
+  for (const t of document.querySelectorAll(".tab")) t.classList.toggle("on", t.dataset.tab === name);
+  $("#tab-logs").hidden = name !== "logs"; $("#tab-settings").hidden = name !== "settings";
+}
+for (const t of document.querySelectorAll(".tab")) t.onclick = () => showTab(t.dataset.tab);
+
+/* ---------------- settings ---------------- */
+const GROUPS = {aoi: "Area of interest", bike: "Bike", llm: "AI environmental risk", escalation: "Risk escalation", startup: "Startup & ENVELOPE"};
+function fieldVal(key) {
+  const el = document.getElementById("f_" + key); if (!el) return "";
+  return el.type === "checkbox" ? (el.checked ? "1" : "") : el.value.trim();
+}
+// what compose would use: the field, or the compose default when empty
+function effVal(key) {
+  const f = settingsCache && settingsCache.fields.find(f => f.key === key);
+  return fieldVal(key) || (f ? f.default : "");
+}
+function setField(key, v) { const el = document.getElementById("f_" + key); if (el) { el.value = v; markDirty(); } }
+function markDirty() {
+  if (!settingsCache) return;
+  for (const f of settingsCache.fields) {
+    const box = document.getElementById("fw_" + f.key);
+    if (box) box.classList.toggle("dirty", fieldVal(f.key) !== current(f));
+  }
+  if (draft) draft.sync();
+  checkCoverage();
+}
+function current(f) { return f.kind === "flag" ? (f.value ? "1" : "") : (f.overridden ? f.value : ""); }
+function checkCoverage() {
+  if (!settingsCache) return;
+  const ok = circleInBox(+effVal("AOI_LAT"), +effVal("AOI_LON"), +effVal("AOI_RADIUS"), geomBBox);
+  $("#geomWarn").innerHTML = ok ? "" : `<div class="warnbox small">The AoI reaches outside the site geometry (<code>${esc(settingsCache.geometry.path)}</code>): there the LLM has no map. Re-run <code>fetch_geometry.py</code> for the new area.</div>`;
+}
+async function loadSettings() {
+  const s = await (await fetch("/api/settings")).json();
+  settingsCache = s; geomBBox = s.geometry.bbox;
+  const eff = Object.fromEntries(s.fields.map(f => [f.key, f.value]));
+  drawAoi(eff); drawCoverage();
+  const grid = $("#sgrid"); grid.innerHTML = "";
+  for (const [g, title] of Object.entries(GROUPS)) {
+    const fs = document.createElement("fieldset"); fs.innerHTML = `<legend>${title}</legend>`;
+    for (const f of s.fields.filter(f => f.group === g)) {
+      const w = document.createElement("div"); w.className = "field"; w.id = "fw_" + f.key;
+      if (f.kind === "flag") {
+        w.innerHTML = `<label class="check"><input type="checkbox" id="f_${f.key}" ${f.value ? "checked" : ""}> ${esc(f.label)}</label>`;
+      } else {
+        const type = f.kind === "secret" ? "password" : f.kind === "clock" ? "datetime-local" : "text";
+        w.innerHTML = `<label for="f_${f.key}">${esc(f.label)} <span class="muted">(${esc(f.key)})</span></label>
+          <div class="row"><input type="${type}" id="f_${f.key}" value="${esc(f.overridden ? f.value : "")}" placeholder="${esc(f.default ? "default: " + f.default : "empty")}">
+          ${f.kind === "secret" ? `<button type="button" data-show="${f.key}">show</button>` : ""}
+          ${f.kind === "clock" ? `<button type="button" data-clear="${f.key}">real time</button>` : ""}</div>
+          <div class="err" id="fe_${f.key}"></div>`;
+      }
+      fs.appendChild(w);
+    }
+    grid.appendChild(fs);
+  }
+  grid.oninput = grid.onchange = markDirty;
+  grid.onclick = e => {
+    const b = e.target.closest("button"); if (!b) return;
+    if (b.dataset.show) { const i = $("#f_" + b.dataset.show); i.type = i.type === "password" ? "text" : "password"; b.textContent = i.type === "password" ? "show" : "hide"; }
+    if (b.dataset.clear) { setField(b.dataset.clear, ""); }
+  };
+  markDirty();
+}
+$("#revert").onclick = () => { if (draft) { draft.stop(); $("#editAoi").textContent = "Edit AoI on map"; } loadSettings(); $("#applyMsg").textContent = ""; };
+$("#apply").onclick = async () => {
+  const values = {};
+  for (const f of settingsCache.fields) if (fieldVal(f.key) !== current(f)) values[f.key] = fieldVal(f.key);
+  const rebuild = $("#rebuild").checked;
+  if (!Object.keys(values).length && !rebuild) { $("#applyMsg").textContent = "Nothing changed."; return; }
+  const list = Object.entries(values).map(([k, v]) => `  ${k} = ${v === "" ? "(default)" : k.includes("TOKEN") ? "••••" : v}`).join("\n");
+  if (!confirm(`Restart broker and escalator with:\n${list || "  (no setting changes)"}${rebuild ? "\n\n…rebuilding the image first" : ""}?`)) return;
+  for (const el of document.querySelectorAll(".field .err")) el.textContent = "";
+  $("#apply").disabled = true;
+  try {
+    const r = await fetch("/api/apply", {method: "POST", headers: {"Content-Type": "application/json", "X-Guardtwin": "1"},
+      body: JSON.stringify({values, rebuild})});
+    const d = await r.json();
+    if (!r.ok) {
+      if (d.errors) for (const [k, m] of Object.entries(d.errors)) { const el = $("#fe_" + k); if (el) el.textContent = m; }
+      $("#applyMsg").innerHTML = `<div class="warnbox">${esc(d.error || "Some values are invalid (see below).")}</div>`;
+    } else {
+      $("#applyMsg").innerHTML = `<div class="warnbox">Saved to .env; <code>docker compose up -d</code> is running: follow it in Logs → Compose runs.</div>`;
+      if (draft) { draft.stop(); $("#editAoi").textContent = "Edit AoI on map"; }
+      settingsCache = d.settings; await loadSettings();
+    }
+  } finally { $("#apply").disabled = false; }
+};
+
+loadSettings().then(connect);
+pollLogs();
+</script>
+</body>
+</html>

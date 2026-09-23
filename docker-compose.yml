@@ -1,5 +1,4 @@
-# guardtwin sensor-fusion broker
-name: guardtwin-sensor-fusion
+name: guardtwin-edge
 
 services:
     broker:
@@ -7,80 +6,49 @@ services:
         image: guardtwin-broker:latest
         container_name: guardtwin-broker
         restart: unless-stopped
-        # No depends_on on vllm: the broker must start and keep serving
-        # radar+channel risk immediately, even while the model is still
-        # loading (can take 60s+ on first pull) or if vLLM is down --
-        # dt_ai_env_risk just stays 0 until the LLM becomes available,
-        # exactly like it already tolerates AMF/metrics being unreachable.
         ports:
             - "${UDP_INGEST_PORT:-30491}:${UDP_INGEST_PORT:-30491}/udp"
-            - "${DT_SERVE_PORT:-30500}:${DT_SERVE_PORT:-30500}/tcp"
-            - "${NOTIFY_PORT:-8080}:${NOTIFY_PORT:-8080}/tcp"
+            - "${ESCALATOR_SERVE_PORT:-30500}:${ESCALATOR_SERVE_PORT:-30500}/tcp"
+            - "${NOTIFY_PORT:-8081}:${NOTIFY_PORT:-8081}/tcp"
         volumes:
             - "${GEOMETRY_FILE_HOST:-./geometry.geojson}:/app/geometry.geojson:ro"
-        # Phase 1/2 (startup.py): NOTIFY_HOST must be this host's IP as
-        # reachable *from ENVELOPE* (192.168.0.38) -- not auto-detectable
-        # from inside the container, so it's required, not defaulted.
-        # SKIP_DEVICE_DETECT (any non-empty value) skips phase 2 (waiting
-        # for the first radar UDP frame on --listen-port, whose source
-        # IP is the sensing node -- no ENVELOPE query/handshake
-        # involved). VERBOSE (any non-empty value) turns on debug
-        # logging for phase 1 (ENVELOPE health/subscribe calls, incoming
-        # notifications) -- see it with `docker compose logs -f broker`.
-        # `command` is a single string,
-        # not a list, on purpose: it's what lets e.g.
-        # ${SKIP_DEVICE_DETECT:+--skip-device-detect} disappear cleanly
-        # when unset instead of leaving a stray empty argument (a YAML
-        # list item can't do that -- it'd stay as an empty "" arg).
-        # Compose splits the string the same way a shell would.
-        # Everything from --imsi on is phase 3 (broker.py), forwarded
-        # as-is; 001010000167802 (..6 is the real SIM). Note: broker.py
-        # has its own separate -v, not affected by VERBOSE here.
         command: >
             ${VERBOSE:+-v}
-            --aoi-lat ${AOI_LAT:-45.064924}
-            --aoi-lon ${AOI_LON:-7.659707}
+            --aoi-lat ${AOI_LAT:-45.06413361104026}
+            --aoi-lon ${AOI_LON:-7.6598566324570925}
             --aoi-radius ${AOI_RADIUS:-150}
-            --notify-port ${NOTIFY_PORT:-8080}
-            --notify-host ${NOTIFY_HOST:-192.168.0.1}
+            --notify-port ${NOTIFY_PORT:-8081}
+            --notify-host ${NOTIFY_HOST:-192.168.0.128}
             ${SKIP_DEVICE_DETECT:+--skip-device-detect}
-            --imsi 001010000167802
+            --imsi ${IMSI:-001010000167802}
             --listen-port ${UDP_INGEST_PORT:-30491}
-            --serve-port ${DT_SERVE_PORT:-30500}
+            --serve-port ${ESCALATOR_SERVE_PORT:-30500}
             --resolver-url http://10.211.1.140:18080
             --metrics-url http://10.211.1.140:8080
             --gnb-id f01
             --llm-url http://vllm:8000
-            --llm-model ${LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+            --llm-model ${LLM_MODEL:-google/gemma-4-12B-it-qat-w4a16-ct}
             --llm-retry-s ${LLM_RETRY_S:-1.0}
             --llm-stale-s ${LLM_STALE_S:-12.0}
             --llm-http-timeout ${LLM_HTTP_TIMEOUT:-20.0}
             --geometry-file /app/geometry.geojson
+            ${LLM_DISABLE:+--llm-disable}
+            ${LLM_CLOCK:+--llm-clock ${LLM_CLOCK}}
 
-    dt-client:
+    escalator:
         build: .
         image: guardtwin-broker:latest
-        container_name: guardtwin-dt-client
+        container_name: guardtwin-escalator
         restart: unless-stopped
-        # Same image as `broker` (it already has dt_client.py + the
-        # `requests` dep for envelope_location.py's devices-in-area
-        # lookup), just a different entrypoint/command -- no separate
-        # Dockerfile needed.
-        entrypoint: ["python3", "-u", "dt_client.py"]
-        # depends_on only orders container start, it doesn't wait for
-        # broker to be ready -- fine, dt_client.py already retries the
-        # TCP connection in a loop instead of failing once.
+        entrypoint: ["python3", "-u", "escalator.py"]
         depends_on:
             - broker
-        # VERBOSE (any non-empty value) turns on DEBUG logging here too --
-        # same flag as the broker service, see it with
-        # `docker compose logs -f dt-client`.
         command: >
             ${VERBOSE:+-v}
             --host broker
-            --port ${DT_SERVE_PORT:-30500}
-            --aoi-lat ${AOI_LAT:-45.064924}
-            --aoi-lon ${AOI_LON:-7.659707}
+            --port ${ESCALATOR_SERVE_PORT:-30500}
+            --aoi-lat ${AOI_LAT:-45.06413361104026}
+            --aoi-lon ${AOI_LON:-7.6598566324570925}
             --aoi-radius ${AOI_RADIUS:-150}
             --devices-max-age-s ${DEVICES_MAX_AGE_S:-1}
             ${AOI_ID:+--aoi-id ${AOI_ID}}
@@ -89,7 +57,7 @@ services:
             --risk-escalator-aoi-id ${AOI_ID:-turin-masa-aoi-1}
 
     vllm:
-        image: vllm/vllm-openai:v0.6.3
+        image: vllm/vllm-openai:v0.30.0
         container_name: guardtwin-vllm
         restart: unless-stopped
         ports:
@@ -98,11 +66,14 @@ services:
             - "vllm-cache:/root/.cache/huggingface"
         command:
             - "--model"
-            - "${LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}"
+            - "${LLM_MODEL:-google/gemma-4-12B-it-qat-w4a16-ct}"
+            # Was "${LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}"
             - "--max-model-len"
             - "${LLM_MAX_MODEL_LEN:-8192}"
             - "--gpu-memory-utilization"
             - "${LLM_GPU_MEM_UTIL:-0.85}"
+            - "--limit-mm-per-prompt"
+            - '{"image": 0, "audio": 0}'
         deploy:
             resources:
                 reservations:
@@ -113,12 +84,5 @@ services:
         shm_size: "2gb"
 
 volumes:
-    # Bound to the volume created by the previous (smi-sensor-fusion-named)
-    # deployment on purpose: it already holds the ~15GB Qwen2.5-7B-Instruct
-    # weight cache, and this host is at 92% disk usage with only ~12GB
-    # free -- not enough headroom to safely duplicate it under a fresh
-    # guardtwin-* name. No data movement, no re-download; every other
-    # name (containers, image, compose project) is renamed as requested.
     vllm-cache:
-        name: smi-sensor-fusion_vllm-cache
-        external: true
+        name: guardtwin-edge_vllm-cache

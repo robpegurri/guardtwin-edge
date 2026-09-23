@@ -1,5 +1,5 @@
 """
-    ENVELOPE Location APIs - Devices-in-Area
+    ENVELOPE LOCATION APIs - Devices-in-Area
 """
 
 import json

@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
-r"""Auxiliary, offline tool: downloads static site geometry (buildings,
-roads, amenities) around a point from OpenStreetMap via the Overpass API
-and writes it as a GeoJSON FeatureCollection, in the shape broker.py's
---geometry-file expects.
+"""
+AUXILIARY TOOL FOR GEOMETRY FETCHING
 
-Not run by broker.py itself, and not run automatically: the public
-Overpass instance is unreliable enough (frequent 504s under load) that
-fetching it live on every broker startup isn't worth it for geometry
-that doesn't change at runtime. Run this by hand instead, once per site
-(or whenever the survey needs updating), inspect the result, then point
---geometry-file at it.
+Downloads static site geometry (buildings, roads, crossings, tram tracks,
+amenities) around a point from 
+OpenStreetMap via the Overpass API and writes it as a GeoJSON FeatureCollection, 
+in the shape broker.py's --geometry-file expects.
 
 Usage:
     python3 fetch_geometry.py --lat 45.064924 --lon 7.659707 --radius-m 300 \
         --out geometry.geojson
 
-Only the Python standard library is used.
 """
 
 import argparse
@@ -33,9 +28,10 @@ RETRY_BACKOFF_S = 3.0
 
 
 def _bbox_square(center_lat, center_lon, radius_m):
-    """(south, west, north, east) bounds of a 2*radius_m-side square
-    centered on (center_lat, center_lon), flat-earth approximation
-    (adequate at the ~100-1000 m scale used here)."""
+    """
+    (south, west, north, east) bounds of a 2*radius_m-side square
+    centered on (center_lat, center_lon)
+    """
     dlat = radius_m / 111320.0
     dlon = radius_m / (111320.0 * math.cos(math.radians(center_lat)))
     return (center_lat - dlat, center_lon - dlon,
@@ -49,43 +45,54 @@ def _overpass_query(south, west, north, east, timeout_s):
         "("
         f'way["building"]({bbox});'
         f'way["highway"]({bbox});'
+        f'node["highway"]({bbox});'          # crossings, traffic signals, stop signs
+        f'way["railway"="tram"]({bbox});'
         f'node["amenity"]({bbox});'
         f'way["amenity"]({bbox});'
         ");"
-        "out center;"
+        "out geom;"
     )
 
 
 def _overpass_to_geojson(elements):
-    """Overpass JSON elements -> a GeoJSON FeatureCollection of Points
-    (ways/relations use their `out center` centroid; OSM tags become
-    GeoJSON properties) -- exactly the shape broker.py's --geometry-file
-    expects."""
+    """
+    Overpass JSON elements -> a GeoJSON FeatureCollection keeping the real
+    shapes: nodes become Points, closed ways Polygons, open ways LineStrings
+    (OSM tags become GeoJSON properties)
+    """
     features = []
     for el in elements:
         if el.get("type") == "node":
-            lon, lat = el.get("lon"), el.get("lat")
+            if el.get("lon") is None or el.get("lat") is None:
+                continue
+            geom = {"type": "Point", "coordinates": [el["lon"], el["lat"]]}
         else:
-            center = el.get("center") or {}
-            lon, lat = center.get("lon"), center.get("lat")
-        if lon is None or lat is None:
-            continue
+            coords = [[p["lon"], p["lat"]] for p in el.get("geometry") or []
+                      if p and p.get("lon") is not None]
+            if not coords:
+                continue
+            if len(coords) >= 4 and coords[0] == coords[-1]:
+                geom = {"type": "Polygon", "coordinates": [coords]}
+            else:
+                geom = {"type": "LineString", "coordinates": coords}
         features.append({
             "type": "Feature",
             "properties": el.get("tags") or {},
-            "geometry": {"type": "Point", "coordinates": [lon, lat]},
+            "geometry": geom,
         })
     return {"type": "FeatureCollection", "features": features}
 
 
 def _download(query, overpass_url, http_timeout, max_bytes):
-    """One attempt: POST the query, return the parsed JSON doc. Raises on
+    """
+    One attempt: POST the query, return the parsed JSON doc. Raises on
     any network/HTTP/size/parse problem -- the caller decides whether to
-    retry."""
+    retry.
+    """
     body = urllib.parse.urlencode({"data": query}).encode("utf-8")
     req = urllib.request.Request(
         overpass_url, data=body, method="POST",
-        headers={"User-Agent": "guardtwin-sensor-fusion/1.0"})
+        headers={"User-Agent": "guardtwin-envelope/1.0"})
     with urllib.request.urlopen(req, timeout=http_timeout) as r:
         raw = r.read(max_bytes + 1)
     if len(raw) > max_bytes:
@@ -94,14 +101,13 @@ def _download(query, overpass_url, http_timeout, max_bytes):
 
 
 def fetch(lat, lon, radius_m, overpass_url, http_timeout, max_bytes, attempts):
-    """Downloads OSM buildings/roads/amenities in a square of side
-    2*radius_m centered on (lat, lon). Retries a few times (the public
-    Overpass instance answers 504 fairly often under load, transiently --
-    a later attempt, possibly routed to a different backend, often
-    succeeds); raises RuntimeError if every attempt fails."""
+    """
+    Downloads OSM buildings/roads/amenities in a square of side
+    2*radius_m centered on (lat, lon)
+    """
     south, west, north, east = _bbox_square(lat, lon, radius_m)
     query = _overpass_query(south, west, north, east, http_timeout)
-    log.info("downloading from %s (center=%.6f,%.6f radius=%.0fm, "
+    log.info("[INFO] Downloading from %s (center=%.6f,%.6f radius=%.0fm, "
              "bbox=%.6f,%.6f,%.6f,%.6f)",
              overpass_url, lat, lon, radius_m, south, west, north, east)
 
@@ -111,10 +117,11 @@ def fetch(lat, lon, radius_m, overpass_url, http_timeout, max_bytes, attempts):
             doc = _download(query, overpass_url, http_timeout, max_bytes)
             break
         except Exception as e:
-            log.warning("attempt %d/%d failed (%s)", attempt, attempts, e)
+            log.warning("[WARNING] attempt %d/%d failed (%s)", attempt, attempts, e)
             if attempt < attempts:
                 time.sleep(RETRY_BACKOFF_S)
     if doc is None:
+        log.critical("[CRITICAL] Overpass unreachable after {attempts} attempt(s)")
         raise RuntimeError(f"Overpass unreachable after {attempts} attempt(s)")
 
     return _overpass_to_geojson(doc.get("elements") or [])
@@ -147,18 +154,19 @@ def main():
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
+    log.info("[INFO] Starting geometry fetch...")
     try:
         collection = fetch(args.lat, args.lon, args.radius_m,
                             args.overpass_url, args.http_timeout,
                             args.max_bytes, args.attempts)
     except RuntimeError as e:
-        log.critical("%s -- try again later, or pass --overpass-url to use "
+        log.critical("[CRITICAL] %s -- try again later, or pass --overpass-url to use "
                     "a different instance", e)
         sys.exit(1)
 
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(collection, f, indent=2)
-    log.info("wrote %d feature(s) to %s", len(collection["features"]), args.out)
+    log.info("[INFO] Wrote %d feature(s) to %s", len(collection["features"]), args.out)
 
 
 if __name__ == "__main__":

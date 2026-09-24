@@ -24,14 +24,15 @@ byte-exact replay) -- do not expect the newly computed risk_score to
 match the historical value in the log; the point is to exercise the full
 pipeline, including the new async LLM factor, against real field shapes.
 
-Usage (run broker.py separately, pointed at this script's mock servers):
+Usage (from the repo root; run broker.py separately, pointed at this
+script's mock servers):
 
-    python3 test_replay.py --amf-port 18080 --metrics-port 18081 &
+    python3 tools/test_replay.py --amf-port 18080 --metrics-port 18081 &
     python3 broker.py --imsi 001010000167806 \
         --listen-port 30491 --serve-port 30500 \
         --resolver-url http://127.0.0.1:18080 \
         --metrics-url http://127.0.0.1:18081 --gnb-id f01 \
-        --llm-url http://127.0.0.1:8000 --geometry-file geometry.geojson \
+        --llm-url http://127.0.0.1:8000 --geometry-file files/geometry.geojson \
         --stdout -v
 """
 

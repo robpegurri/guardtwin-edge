@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 import urllib.request
+from collections import deque
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -165,9 +166,11 @@ def add_arguments(ap):
     g.add_argument("--geometry-file", default=None,
                    help="path to a static local GeoJSON file with buildings/"
                         "roads around the deployment site (generate one with "
-                        "fetch_geometry.py); without it the feature is off")
+                        "tools/fetch_geometry.py); without it the feature is off")
     g.add_argument("--geometry-max-bytes", type=int, default=20_000_000,
                    help="startup size guard on --geometry-file")
+    g.add_argument("--ai-context-max", type=float, default=ENV_RISK_BOOST_MAX,
+                   help="most points the AI Context Score adds to the risk")
     g.add_argument("--llm-disable", action="store_true",
                    help="disable the AI Environmental Risk feature entirely")
     g.add_argument("--radar-idle-s", type=float, default=5.0,
@@ -293,7 +296,7 @@ def describe(props):
 def load_geometry(path, max_bytes):
     """
     Loads a static GeoJSON FeatureCollection at startup (see
-    fetch_geometry.py), keeps the features describe() cares about and
+    tools/fetch_geometry.py), keeps the features describe() cares about and
     projects their shapes to local east/north meters, so that per-call
     distances are plain 2-D geometry. Returns a dict, or None when there
     is no geometry (the feature is then off).
@@ -608,9 +611,9 @@ def parse_hazards(text, items):
     return hazards
 
 
-def score_hazards(hazards):
+def score_hazards(hazards, max_points=ENV_RISK_BOOST_MAX):
     """
-    Risk points (0..ENV_RISK_BOOST_MAX). Each hazard is a 0-1 risk (severity
+    Risk points (0..max_points). Each hazard is a 0-1 risk (severity
     x where its feature is x how busy it is now); a feature cited more than
     once counts once, at its strongest; the worst feature counts fully and
     the others at SECONDARY_WEIGHT, combined as a noisy-OR.
@@ -623,7 +626,7 @@ def score_hazards(hazards):
     no_risk = 1.0
     for rank, r in enumerate(sorted(per_feature.values(), reverse=True)):
         no_risk *= 1.0 - r * (1.0 if rank == 0 else SECONDARY_WEIGHT)
-    return (1.0 - no_risk) * ENV_RISK_BOOST_MAX
+    return (1.0 - no_risk) * max_points
 
 
 def _pose(ego):
@@ -671,6 +674,8 @@ class EnvRiskEstimator:
         self._result = None          # {"pose", "hazards", "points", "mono", "asked"}
         self._latency_s = LATENCY_INIT_S   # running average, for the lookahead
         self._clock = site_clock(args)
+        self._calls = deque(maxlen=60)     # (start mono, latency s, ok), for stats
+        self._n_calls = self._n_failed = 0
         self._stop = threading.Event()
 
     def update_pose(self, ego):
@@ -713,34 +718,63 @@ class EnvRiskEstimator:
 
             lead_m = (pose["speed"] or 0.0) * self._latency_s
             query = _project(pose, lead_m)
+            now = self._clock()
             t0 = time.monotonic()
             try:
-                system_msg, user_msg, items = build_prompt(self.geo, query,
-                                                           self._clock())
+                system_msg, user_msg, items = build_prompt(self.geo, query, now)
                 log.debug("prompt:\n%s", user_msg)
                 raw = call_llm(self.args, system_msg, user_msg)
             except Exception as e:
                 log.warning("LLM call failed after %.2fs (%s)",
                             time.monotonic() - t0, e)
+                self._record_call(t0, time.monotonic() - t0, False)
                 self._stop.wait(self.args.llm_retry_s)
                 continue
             latency_s = time.monotonic() - t0
             self._latency_s = 0.7 * self._latency_s + 0.3 * latency_s
             hazards = parse_hazards(raw, items)
+            self._record_call(t0, latency_s, hazards is not None)
             if hazards is None:
                 log.warning("could not parse LLM answer after %.2fs: %r",
                             latency_s, raw[:200])
                 continue
-            points = score_hazards(hazards)
+            points = score_hazards(hazards, self.args.ai_context_max)
+            # What the model saw and said, for debugging views (the system
+            # prompt is constant, so only the per-call part is kept)
+            call = {"latency_s": round(latency_s, 2), "lead_m": round(lead_m, 1),
+                    "clock": f"{now:%a %d %b %Y %H:%M}", "prompt": user_msg,
+                    "answer": raw.strip()}
             with self._lock:
                 self._result = {"pose": query, "hazards": hazards,
                                 "points": points, "mono": time.monotonic(),
-                                "asked": t0}
+                                "asked": t0, "call": call}
             log.info("LLM %.1fs, asked %.0f m ahead -> %.1f pts: %s",
                      latency_s, lead_m, points,
                      "; ".join(f"{h['type']} {h['direction']} ({h['severity']}, "
                                f"{h['group']}, {h['activity']})" for h in hazards)
                      or "no hazards")
+
+    def _record_call(self, t0, latency_s, ok):
+        with self._lock:
+            self._calls.append((t0, latency_s, ok))
+            self._n_calls += 1
+            self._n_failed += not ok
+
+    def _stats(self):
+        """Timing of the recent calls (call under self._lock)."""
+        lat = sorted(l for _, l, ok in self._calls if ok)
+        starts = [t for t, _, _ in self._calls]
+        gaps = [b - a for a, b in zip(starts[-21:], starts[-20:])]
+        now = time.monotonic()
+        return {
+            "calls": self._n_calls, "failed": self._n_failed,
+            "latency_last_s": round(self._calls[-1][1], 2) if self._calls else None,
+            "latency_avg_s": round(sum(lat) / len(lat), 2) if lat else None,
+            "latency_p95_s": round(lat[min(len(lat) - 1, int(0.95 * len(lat)))], 2) if lat else None,
+            "interval_avg_s": round(sum(gaps) / len(gaps), 2) if gaps else None,
+            "calls_last_min": sum(1 for t in starts if now - t <= 60.0),
+            "since_last_call_s": round(now - starts[-1], 1) if starts else None,
+        }
 
     def start(self):
         if not self.enabled:
@@ -755,17 +789,20 @@ class EnvRiskEstimator:
     def snapshot(self, ego):
         """
         The contribution for a frame at pose `ego`: {"points", "state",
-        "age_s", "hazards"}. points is 0 unless state is "ok": the result
-        must be recent *and* computed for (about) the current pose.
+        "age_s", "hazards", ...}. points is 0 unless state is "ok": the result
+        must be recent *and* computed for (about) the current pose. Also
+        "call" (prompt, answer, latency of the call behind the result) and
+        "stats" (timing of the recent calls), for debugging views.
         """
         if not self.enabled:
             return {"points": 0.0, "state": "disabled", "age_s": None,
                     "hazards": None}
         with self._lock:
             result = self._result
+            stats = self._stats()
         if result is None:
             return {"points": 0.0, "state": "no_result", "age_s": None,
-                    "hazards": None}
+                    "hazards": None, "stats": stats}
         age = time.monotonic() - result["mono"]
         pose = _pose(ego)
         if age > self.args.llm_stale_s:
@@ -778,4 +815,5 @@ class EnvRiskEstimator:
         return {"points": result["points"] if state == "ok" else 0.0,
                 "state": state, "age_s": round(age, 2),
                 "hazards": result["hazards"],
-                "asked_pos": [result["pose"]["lat"], result["pose"]["lon"]]}
+                "asked_pos": [result["pose"]["lat"], result["pose"]["lon"]],
+                "call": result["call"], "stats": stats}

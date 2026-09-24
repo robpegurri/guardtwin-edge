@@ -33,8 +33,8 @@
 :root[data-theme="dark"] .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.85) contrast(.9); }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; }
-body { background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+html, body { margin: 0; height: 100%; overflow: hidden; }
+body { display: flex; flex-direction: column; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
 header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 14px; background: var(--surface); border-bottom: 1px solid var(--border); }
 header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 650; }
 .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-2); background: var(--surface); white-space: nowrap; }
@@ -47,10 +47,13 @@ button:hover { border-color: var(--text-2); }
 button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 button:disabled { opacity: .5; cursor: default; }
 
-main { display: grid; grid-template-columns: minmax(0, 1fr) 400px; grid-template-rows: minmax(360px, 58vh) auto; gap: 10px; padding: 10px; }
-#map { grid-column: 1; grid-row: 1; border-radius: 8px; border: 1px solid var(--border); min-height: 360px; }
-#side { grid-column: 2; grid-row: 1 / span 2; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-#bottom { grid-column: 1; grid-row: 2; min-width: 0; }
+header { flex: none; }
+main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 400px; grid-template-rows: minmax(0, 1.15fr) minmax(0, 1fr); gap: 10px; padding: 10px; }
+#map { grid-column: 1; grid-row: 1; border-radius: 8px; border: 1px solid var(--border); min-height: 0; }
+/* the right column scrolls inside itself when its cards are taller than the window */
+#side { grid-column: 2; grid-row: 1 / span 2; display: flex; flex-direction: column; gap: 10px; min-width: 0; min-height: 0; overflow-y: auto; }
+#side > .card { flex: none; }
+#bottom { grid-column: 1; grid-row: 2; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; min-width: 0; }
 .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-2); margin: 0 0 8px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .card h2 .right { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--muted); }
@@ -61,7 +64,7 @@ main { display: grid; grid-template-columns: minmax(0, 1fr) 400px; grid-template
 .risk-score { font-size: 34px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1; }
 .risk-score small { font-size: 14px; color: var(--muted); font-weight: 400; }
 .level { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
-.comp { display: grid; grid-template-columns: 10px 1fr 44px; align-items: center; gap: 4px 8px; margin-top: 8px; }
+.comp { display: grid; grid-template-columns: 10px 1fr 64px; align-items: center; gap: 4px 8px; margin-top: 8px; }
 .sw { width: 10px; height: 10px; border-radius: 3px; }
 .comp .name { color: var(--text-2); } .comp .val { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
 .bar { grid-column: 2 / span 2; height: 6px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
@@ -81,19 +84,38 @@ main { display: grid; grid-template-columns: minmax(0, 1fr) 400px; grid-template
 .kv div:nth-child(odd) { color: var(--muted); }
 details { margin-top: 4px; } summary { cursor: pointer; color: var(--text-2); }
 pre.json { font: 11px/1.35 var(--mono); background: var(--surface-2); padding: 6px; border-radius: 6px; overflow: auto; max-height: 180px; margin: 4px 0; }
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 2px 0 8px; }
+.stat { background: var(--surface-2); border-radius: 6px; padding: 4px 6px; }
+.stat .v { font-weight: 650; font-variant-numeric: tabular-nums; font-size: 14px; }
+.stat .k { color: var(--muted); font-size: 11px; }
+pre.prompt { font: 11px/1.4 var(--mono); background: var(--surface-2); padding: 6px; border-radius: 6px; overflow: auto; max-height: 220px; margin: 4px 0; white-space: pre-wrap; }
+.flag { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; background: var(--surface-2); font-weight: 600; margin-bottom: 6px; }
+.flag .dot { width: 10px; height: 10px; }
+.flag .sub { font-weight: 400; color: var(--muted); margin-left: auto; font-size: 12px; }
+.hzrow { padding: 4px 0; border-top: 1px solid var(--border); }
+.hzrow:first-child { border-top: 0; }
+.hzrow.old { opacity: .55; }
+.hzrow .l1 { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.hzrow .l1 .meta { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.hzrow .why { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sev { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: var(--text-2); min-width: 58px; }
+.sev .dot { width: 7px; height: 7px; }
 .warnbox { border-left: 3px solid var(--warning); background: var(--surface-2); padding: 6px 8px; border-radius: 4px; margin-top: 6px; }
 
 /* bottom tabs */
 .tabs { display: flex; gap: 4px; margin-bottom: -1px; }
 .tab { border: 1px solid var(--border); border-bottom: 0; border-radius: 8px 8px 0 0; background: var(--surface-2); padding: 5px 14px; cursor: pointer; color: var(--text-2); }
 .tab.on { background: var(--surface); color: var(--text); font-weight: 600; }
-.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 0 8px 8px 8px; padding: 10px 12px; }
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 0 8px 8px 8px; padding: 10px 12px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.panel[hidden] { display: none; }
+#tab-settings { overflow-y: auto; display: block; }
+#tab-settings[hidden] { display: none; }
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .seg button { border: 0; border-radius: 0; border-right: 1px solid var(--border); background: var(--surface); }
 .seg button:last-child { border-right: 0; }
 .seg button.on { background: var(--accent); color: #fff; }
 .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
-#logbox { font: 12px/1.45 var(--mono); height: 36vh; min-height: 220px; overflow: auto; background: var(--surface-2); border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; word-break: break-all; }
+#logbox { font: 12px/1.45 var(--mono); flex: 1; min-height: 0; overflow: auto; background: var(--surface-2); border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; word-break: break-all; }
 .ll { display: grid; grid-template-columns: 76px 64px 1fr; gap: 8px; }
 .ll .src { color: var(--muted); } .ll .ts { color: var(--muted); }
 .ll.warn .msg::before { content: "⚠ "; color: var(--warning); }
@@ -118,7 +140,9 @@ legend { color: var(--text-2); font-weight: 600; padding: 0 4px; }
 .leaflet-container { font: inherit; background: var(--surface-2); }
 
 @media (max-width: 1000px) {
-  main { grid-template-columns: 1fr; grid-template-rows: auto; }
+  html, body { overflow: auto; height: auto; }
+  main { display: grid; grid-template-columns: 1fr; grid-template-rows: auto; }
+  #bottom { height: 70vh; }
   #map { grid-column: 1; grid-row: auto; height: 55vh; }
   #side, #bottom { grid-column: 1; grid-row: auto; }
 }
@@ -151,17 +175,20 @@ legend { color: var(--text-2); font-weight: 600; padding: 0 4px; }
       </div>
       <div class="comp" id="comps"></div>
       <div class="legend">
-        <span><i class="sw" style="background:var(--radar)"></i>Radar (deterministic)</span>
-        <span><i class="sw" style="background:var(--chan)"></i>Channel penalty</span>
-        <span><i class="sw" style="background:var(--llm)"></i>AI environment (LLM)</span>
+        <span><i class="sw" style="background:var(--radar)"></i>Deterministic Score</span>
+        <span><i class="sw" style="background:var(--chan)"></i>Channel Penalty</span>
+        <span><i class="sw" style="background:var(--llm)"></i>AI Context Score</span>
       </div>
-      <div id="chartWrap"><canvas id="chart" aria-label="Risk score components over the last 2 minutes, stacked"></canvas><div id="tip"></div></div>
+      <div id="chartWrap"><canvas id="chart" aria-label="Deterministic, Channel Penalty and AI Context scores over the last 2 minutes, stacked"></canvas><div id="tip"></div></div>
       <div class="small muted">Last 2 minutes, stacked: the top edge is the total before the 10-point cap.</div>
     </section>
 
     <section class="card">
-      <h2>AI environment (LLM) <span class="right" id="envState"></span></h2>
+      <h2>AI Context Score <span class="right" id="envState"></span></h2>
+      <div id="riskFlag"></div>
       <div id="hazards" class="small"></div>
+      <div class="stats" id="aiStats" style="margin-top:8px"></div>
+      <div id="aiCall" class="small"></div>
       <div id="geomWarn"></div>
     </section>
 
@@ -173,8 +200,6 @@ legend { color: var(--text-2); font-weight: 600; padding: 0 4px; }
     <section class="card">
       <h2>Devices in area (ENVELOPE) <span class="right" id="devAge"></span></h2>
       <div id="devices" class="small"></div>
-      <h2 style="margin-top:10px">Callbacks received <span class="right" id="cbCount"></span></h2>
-      <div id="callbacks" class="small"></div>
     </section>
   </div>
 
@@ -372,9 +397,9 @@ function drawHazards(env) {
 /* ---------------- risk panel + chart ---------------- */
 let history = []; // [t, radar, llm, chan, total]
 const COMPS = [
-  ["radar_risk", "Radar (deterministic)", "--radar"],
-  ["ai_env_risk", "AI environment (LLM)", "--llm"],
-  ["chan_penalty", "Channel penalty", "--chan"],
+  ["radar_risk", "Deterministic Score", "--radar"],
+  ["ai_env_risk", "AI Context Score", "--llm"],
+  ["chan_penalty", "Channel Penalty", "--chan"],
 ];
 function renderRisk(st) {
   const rec = st.record;
@@ -382,10 +407,11 @@ function renderRisk(st) {
   $("#score").innerHTML = `${(+rec.risk_score).toFixed(1)}<small> / 10</small>`;
   const [cls, label] = LEVEL[rec.risk_level] || ["", rec.risk_level];
   $("#level").innerHTML = `<span class="dot" style="background:var(--${cls})"></span>${esc(label)}`;
+  const lim = rec.limits || {radar_risk: 10, ai_env_risk: 2, chan_penalty: 3};
   $("#comps").innerHTML = COMPS.map(([k, name, c]) => {
-    const v = +rec[k] || 0;
-    return `<i class="sw" style="background:var(${c})"></i><span class="name">${name}</span><span class="val">${v.toFixed(1)}</span>
-      <div class="bar"><div style="width:${Math.min(100, v * 10)}%;background:var(${c})"></div></div>`;
+    const v = +rec[k] || 0, max = +lim[k] || 10;
+    return `<i class="sw" style="background:var(${c})"></i><span class="name">${name}</span><span class="val">${v.toFixed(1)}<span class="muted" style="font-weight:400"> / ${max}</span></span>
+      <div class="bar" title="0 - ${max} points"><div style="width:${Math.min(100, v / max * 100)}%;background:var(${c})"></div></div>`;
   }).join("");
   $("#riskAge").textContent = `seq ${rec.seq ?? "–"} · ${st.record_age_s ?? "–"} s ago · ${st.fps.toFixed(1)} fps`;
 }
@@ -428,9 +454,9 @@ function drawChart() {
     g.strokeStyle = css("--text-2"); g.lineWidth = 1; g.beginPath(); g.moveTo(x + .5, T0); g.lineTo(x + .5, T0 + ph); g.stroke();
     tip.style.display = "block";
     tip.innerHTML = `<b>${(best[4]).toFixed(1)}</b> total · ${Math.round(now - best[0])} s ago<br>
-      <i class="sw" style="display:inline-block;background:var(--radar)"></i> Radar ${best[1].toFixed(1)}<br>
-      <i class="sw" style="display:inline-block;background:var(--chan)"></i> Channel ${best[3].toFixed(1)}<br>
-      <i class="sw" style="display:inline-block;background:var(--llm)"></i> LLM ${best[2].toFixed(1)}`;
+      <i class="sw" style="display:inline-block;background:var(--radar)"></i> Deterministic ${best[1].toFixed(1)}<br>
+      <i class="sw" style="display:inline-block;background:var(--chan)"></i> Channel Penalty ${best[3].toFixed(1)}<br>
+      <i class="sw" style="display:inline-block;background:var(--llm)"></i> AI Context ${best[2].toFixed(1)}`;
     const tw = tip.offsetWidth;
     tip.style.left = (x + 10 + tw > w ? x - tw - 10 : x + 10) + "px"; tip.style.top = "4px";
   } else tip.style.display = "none";
@@ -439,15 +465,52 @@ canvas.addEventListener("mousemove", e => { hoverX = e.offsetX; drawChart(); });
 canvas.addEventListener("mouseleave", () => { hoverX = null; drawChart(); });
 addEventListener("resize", drawChart);
 
+// Replace an element's content only when it changed (the page updates 4x/s),
+// re-opening the <details data-k> the user had open
+function setHTML(el, html) {
+  if (el._html === html) return;
+  const open = new Set([...el.querySelectorAll("details[open][data-k]")].map(d => d.dataset.k));
+  el.innerHTML = html; el._html = html;
+  for (const d of el.querySelectorAll("details[data-k]")) if (open.has(d.dataset.k)) d.open = true;
+}
+const fmtS = v => v == null ? "–" : (+v).toFixed(v < 10 ? 1 : 0) + " s";
+
+const SEV = {high: ["critical", "High"], medium: ["serious", "Medium"], low: ["warning", "Low"]};
+let lastHz = null;          // the last hazards reported: kept on screen, dimmed, once they no longer apply
+function hazardRows(list, old) {
+  return list.map(h => `<div class="hzrow${old ? " old" : ""}" title="cites: ${esc(h.feature)}">
+      <div class="l1"><span class="sev"><span class="dot" style="background:var(--${(SEV[h.severity] || [])[0]})"></span>${esc((SEV[h.severity] || ["", h.severity])[1])}</span>
+        <b>${esc(h.type.replace("_", " ").replace(/^./, c => c.toUpperCase()))}</b>
+        <span class="meta">${esc(h.direction)} · ${esc(h.activity || "normal")}</span></div>
+      <div class="why" title="${esc(h.evidence)}">${esc(h.evidence)}</div></div>`).join("");
+}
 function renderEnv(rec, settings) {
   const env = rec && rec.env;
-  if (!env) { $("#hazards").innerHTML = `<span class="muted">No record yet.</span>`; $("#envState").textContent = ""; return; }
+  if (!env) { setHTML($("#riskFlag"), ""); setHTML($("#hazards"), `<span class="muted">No record yet.</span>`); $("#envState").textContent = ""; return; }
   $("#envState").textContent = `${env.state}${env.age_s != null ? " · " + env.age_s + " s old" : ""} · +${(+rec.ai_env_risk).toFixed(1)} pts`;
-  const hz = env.hazards || [];
-  $("#hazards").innerHTML = hz.length ? hz.map(h => `<div class="hz">
-      <span class="t">${esc(h.type.replace("_", " "))}</span><span class="chip">${esc(h.severity)}</span><span class="chip">${esc(h.activity || "normal")}</span><span class="chip">${esc(h.group)} · ${esc(h.direction)}</span>
-      <div>${esc(h.evidence)}</div><div class="muted">${esc(h.feature)}</div></div>`).join("")
-    : `<span class="muted">${env.state === "ok" ? "No hazards reported for this stretch." : "No valid result (" + esc(env.state) + ")."}</span>`;
+  const hz = env.hazards || [], now = Date.now();
+  const current = env.state === "ok" && hz.length > 0;
+  if (hz.length) {
+    const key = JSON.stringify(hz.map(h => [h.type, h.feature, h.severity]));
+    if (!lastHz || lastHz.key !== key || current) lastHz = {key, list: hz, t: current ? now : (lastHz && lastHz.key === key ? lastHz.t : now - (env.age_s || 0) * 1000)};
+  }
+  let flag;
+  if (current) flag = `<div class="flag"><span class="dot" style="background:var(--serious)"></span>⚠ Risk currently detected<span class="sub">${hz.length} hazard${hz.length > 1 ? "s" : ""}</span></div>`;
+  else if (lastHz) flag = `<div class="flag"><span class="dot"></span>Risk previously detected<span class="sub">${Math.round((now - lastHz.t) / 1000)} s ago</span></div>`;
+  else flag = `<div class="flag"><span class="dot" style="background:var(--good)"></span>No risk detected${env.state !== "ok" ? `<span class="sub">${esc(env.state)}</span>` : ""}</div>`;
+  setHTML($("#riskFlag"), flag);
+  setHTML($("#hazards"), current ? hazardRows(hz, false) : lastHz ? hazardRows(lastHz.list, true) : "");
+  const s = env.stats || {};
+  setHTML($("#aiStats"), env.stats ? [
+    [fmtS(s.latency_last_s), "last call"], [`${fmtS(s.latency_avg_s)}`, "avg latency"], [fmtS(s.latency_p95_s), "p95 latency"],
+    [fmtS(s.interval_avg_s), "between calls", "Not on a timer: the next call starts as soon as the previous answer arrives, if the bike moved ≥3 m or turned ≥10°; a stopped bike is re-asked every 5 min."],
+    [s.calls_last_min ?? "–", "calls / last min"], [`${s.calls ?? 0}${s.failed ? " · " + s.failed + " failed" : ""}`, "calls total"],
+  ].map(([v, k, tip]) => `<div class="stat"${tip ? ` title="${esc(tip)}"` : ""}><div class="v">${esc(v)}</div><div class="k">${k}${tip ? " ⓘ" : ""}</div></div>`).join("")
+    : `<div class="muted small" style="grid-column:1/-1">Timing metrics need the updated broker image.</div>`);
+  const c = env.call;
+  setHTML($("#aiCall"), c ? `<details data-k="call"><summary>Last answer: ${fmtS(c.latency_s)}, asked ${c.lead_m} m ahead, clock ${esc(c.clock)}</summary>
+      <div class="muted" style="margin-top:4px">Model answer (raw)</div><pre class="prompt">${esc(c.answer)}</pre>
+      <div class="muted">What the model saw (prompt)</div><pre class="prompt">${esc(c.prompt)}</pre></details>` : "");
 }
 
 function renderChan(rec) {
@@ -464,24 +527,15 @@ function renderChan(rec) {
 function renderDevices(st) {
   const d = st.devices || {};
   $("#devAge").textContent = d.t ? `${Math.round(st.now - d.t)} s ago · maxAge ${d.max_age_s ?? "–"} s` : "";
-  if (d.error) $("#devices").innerHTML = `<div class="warnbox">Query failed: ${esc(d.error)}</div>`;
-  else if (!(d.devices || []).length) $("#devices").innerHTML = `<span class="muted">No device in the AoI.</span>`;
-  else $("#devices").innerHTML = d.devices.map(dev => {
+  if (d.error) setHTML($("#devices"), `<div class="warnbox">Query failed: ${esc(d.error)}</div>`);
+  else if (!(d.devices || []).length) setHTML($("#devices"), `<span class="muted">No device in the AoI.</span>`);
+  else setHTML($("#devices"), d.devices.map((dev, i) => {
     const ip = dev.ipv4Address || {};
-    return `<div class="hz"><span class="t">${esc(dev.hostname || ip.publicAddress || "device")}</span>
+    const name = dev.hostname || ip.publicAddress || "device " + (i + 1);
+    return `<div class="hz"><span class="t">${esc(name)}</span>
       <span class="chip">${esc([ip.publicAddress, ip.privateAddress, ip.publicPort].filter(x => x != null).join(" · "))}</span>
-      <details><summary>raw</summary><pre class="json">${esc(JSON.stringify(dev, null, 1))}</pre></details></div>`;
-  }).join("");
-  const n = st.notifications || [];
-  $("#cbCount").textContent = n.length ? `${n.length} (latest first)` : "";
-  $("#callbacks").innerHTML = n.length ? n.slice().reverse().map(x => `<details><summary>${esc(x.ts.slice(11, 19))} from ${esc(x.from)} · ${esc(summarize(x.event))}</summary>
-      <pre class="json">${esc(typeof x.event === "string" ? x.event : JSON.stringify(x.event, null, 1))}</pre></details>`).join("")
-    : `<span class="muted">None since the broker started (they come from its logs).</span>`;
-}
-function summarize(ev) {
-  if (!ev || typeof ev !== "object") return String(ev).slice(0, 60);
-  const t = ev.type || ev.eventType || (ev.data && ev.data.type) || "";
-  return String(t || Object.keys(ev).slice(0, 3).join(", ")).split(".").pop();
+      <details data-k="dev:${esc(name)}"><summary>raw</summary><pre class="json">${esc(JSON.stringify(dev, null, 1))}</pre></details></div>`;
+  }).join(""));
 }
 
 function setPill(id, cls, text, title) {
@@ -575,7 +629,7 @@ function showTab(name) {
 for (const t of document.querySelectorAll(".tab")) t.onclick = () => showTab(t.dataset.tab);
 
 /* ---------------- settings ---------------- */
-const GROUPS = {aoi: "Area of interest", bike: "Bike", llm: "AI environmental risk", escalation: "Risk escalation", startup: "Startup & ENVELOPE"};
+const GROUPS = {aoi: "Area of interest", bike: "Bike", core: "5G core", score: "Score limits", llm: "AI environmental risk", escalation: "Risk escalation", startup: "Startup & ENVELOPE"};
 function fieldVal(key) {
   const el = document.getElementById("f_" + key); if (!el) return "";
   return el.type === "checkbox" ? (el.checked ? "1" : "") : el.value.trim();

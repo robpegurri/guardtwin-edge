@@ -11,7 +11,7 @@ services:
             - "${ESCALATOR_SERVE_PORT:-30500}:${ESCALATOR_SERVE_PORT:-30500}/tcp"
             - "${NOTIFY_PORT:-8081}:${NOTIFY_PORT:-8081}/tcp"
         volumes:
-            - "${GEOMETRY_FILE_HOST:-./geometry.geojson}:/app/geometry.geojson:ro"
+            - "${GEOMETRY_FILE_HOST:-./files/geometry.geojson}:/app/geometry.geojson:ro"
         command: >
             ${VERBOSE:+-v}
             --aoi-lat ${AOI_LAT:-45.06413361104026}
@@ -23,9 +23,11 @@ services:
             --imsi ${IMSI:-001010000167802}
             --listen-port ${UDP_INGEST_PORT:-30491}
             --serve-port ${ESCALATOR_SERVE_PORT:-30500}
-            --resolver-url http://10.211.1.140:18080
-            --metrics-url http://10.211.1.140:8080
+            --resolver-url ${RESOLVER_URL:-http://10.211.1.140:18080}
+            --metrics-url ${METRICS_URL:-http://10.211.1.140:8080}
             --gnb-id f01
+            --chan-penalty-max ${CHAN_PENALTY_MAX:-3.0}
+            --ai-context-max ${AI_CONTEXT_MAX:-2.0}
             --llm-url http://vllm:8000
             --llm-model ${LLM_MODEL:-google/gemma-4-12B-it-qat-w4a16-ct}
             --llm-retry-s ${LLM_RETRY_S:-1.0}

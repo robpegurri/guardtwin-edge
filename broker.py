@@ -229,15 +229,16 @@ CLASS_WEIGHT = {"TRUCK": 1.0, "CAR": 0.9, "SCOOTER": 0.7, "BICYCLE": 0.6,
 TTC_MIN_S, TTC_MAX_S = 1.5, 8.0     # full risk .. no risk
 PROX_MAX_M = 30.0                   # beyond this an obstacle is ignored
 STATIC_DAMP = 0.5
-CHANNEL_BOOST_MAX = 0.3             # radar risk amplification with dead link
+CHAN_PENALTY_MAX = 3.0              # default --chan-penalty-max: points added
+                                     # at radar risk 10 with a dead link
 YAW_BOOST_MAX = 0.15                # extra risk (0-1 object scale) for an object
                                      # whose confirmed direction of motion (DROPMO
                                      # v1.1 yaw) heads back towards the bike
 THREAT_FLOOR = 0.05                 # per-object risk below this is noise
 LEVELS = [(1.0, "none"), (3.0, "low"), (5.0, "medium"),
           (7.5, "high"), (11.0, "critical")]
-# The AI Environmental Risk (ai_assess.py) adds up to
-# ai_assess.ENV_RISK_BOOST_MAX points on top, from the site map alone.
+# The AI Environmental Risk (ai_assess.py) adds up to --ai-context-max
+# points on top, from the site map and the time of day alone.
 
 
 def _yaw_closing(o, ego_lat, ego_lon):
@@ -331,7 +332,7 @@ def assess(frame, ues, env, args):
         link_quality = chan["score"] / 10.0
     else:
         link_quality = 0.0
-    chan_penalty = radar_risk * CHANNEL_BOOST_MAX * (1.0 - link_quality)
+    chan_penalty = radar_risk / 10.0 * args.chan_penalty_max * (1.0 - link_quality)
 
     # AI Environmental Risk: already scored by ai_assess, 0 unless valid here
     ai_env_risk = env["points"]
@@ -355,8 +356,12 @@ def assess(frame, ues, env, args):
                      "score": chan["score"], "state": chan["state"]}
                     if chan else None),
         "ai_env_risk": round(ai_env_risk, 1),
+        # the most each component can contribute (for gauges)
+        "limits": {"radar_risk": 10.0, "chan_penalty": args.chan_penalty_max,
+                   "ai_env_risk": args.ai_context_max},
         "env": {"state": env["state"], "age_s": env["age_s"],
-                "hazards": env["hazards"], "asked_pos": env.get("asked_pos")},
+                "hazards": env["hazards"], "asked_pos": env.get("asked_pos"),
+                "call": env.get("call"), "stats": env.get("stats")},
         "ego": {
             "pos": [lat, lon] if lat is not None else None,
             "heading_deg": ego_in.get("heading_deg"),
@@ -404,6 +409,9 @@ def main():
     ap.add_argument("--score-stale-s", type=float, default=5.0,
                     help="score older than this is flagged 'stale'")
     ap.add_argument("--http-timeout", type=float, default=3.0)
+    ap.add_argument("--chan-penalty-max", type=float, default=CHAN_PENALTY_MAX,
+                    help="most points the Channel Penalty adds: reached with "
+                         "radar risk 10 and a dead link (it scales with both)")
     ai_assess.add_arguments(ap)
     ap.add_argument("--aoi-lat", type=float, default=None,
                     help="area of interest center latitude; frames whose ego "

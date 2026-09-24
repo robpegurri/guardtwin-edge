@@ -6,8 +6,7 @@ Host-side web page for debugging the edge stack at a glance:
   - map: AoI, bike (with trail and heading), radar objects, the hazards the
     LLM cites and the pose it was asked about;
   - live risk score and its 3 components (radar, AI environment, channel);
-  - ENVELOPE devices-in-area: the current query result and the callbacks
-    received by the broker (read from its logs);
+  - ENVELOPE devices-in-area: the current query result for the AoI;
   - settings (AoI and the main compose variables): written to .env, then
     `docker compose up -d broker escalator`;
   - the raw logs of broker, escalator and vLLM, together or one at a time.
@@ -15,11 +14,10 @@ Host-side web page for debugging the edge stack at a glance:
 Runs on the host (it needs the docker CLI) and listens on localhost only:
 open it through VS Code port forwarding or an SSH tunnel.
 
-    python3 dashboard.py [--port 8095]
+    python3 dashboard/dashboard.py [--port 8095]
 """
 
 import argparse
-import ast
 import json
 import logging
 import math
@@ -27,6 +25,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -36,13 +35,15 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
-import envelope_location as loc
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)                 # the compose project (repo root)
+sys.path.insert(0, ROOT)
+import envelope_location as loc             # noqa: E402
 
 log = logging.getLogger("dashboard")
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-COMPOSE_FILE = os.path.join(HERE, "docker-compose.yml")
-ENV_FILE = os.path.join(HERE, ".env")
+COMPOSE_FILE = os.path.join(ROOT, "docker-compose.yml")
+ENV_FILE = os.path.join(ROOT, ".env")
 PAGE = os.path.join(HERE, "dashboard.html")
 
 CONTAINERS = {"broker": "guardtwin-broker", "escalator": "guardtwin-escalator",
@@ -55,6 +56,10 @@ SETTINGS = [
     ("AOI_LON", "Longitude", "aoi", "float"),
     ("AOI_RADIUS", "Radius (m)", "aoi", "float"),
     ("IMSI", "IMSI(s), comma-separated", "bike", "imsi"),
+    ("RESOLVER_URL", "AMF URL (IMSI -> ranUeNgapID)", "core", "url"),
+    ("METRICS_URL", "Metrics server URL (channel score)", "core", "url"),
+    ("AI_CONTEXT_MAX", "AI Context Score: max points", "score", "float"),
+    ("CHAN_PENALTY_MAX", "Channel Penalty: max points", "score", "float"),
     ("LLM_DISABLE", "Disable the AI environmental risk", "llm", "flag"),
     ("LLM_CLOCK", "Fixed LLM clock (empty: real time)", "llm", "clock"),
     ("RISK_ESCALATION_URL", "Risk Escalation URL", "escalation", "url"),
@@ -73,7 +78,6 @@ HISTORY_STEP_S = 0.5
 TRAIL_POINTS = 600
 LOG_LINES = 6000
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-NOTIFICATION = re.compile(r"notification from ([0-9.]+): (.*)$")
 M_PER_DEG = 111320.0
 
 
@@ -162,6 +166,8 @@ def validate(values):
                     raise ValueError("longitude out of range")
                 if k == "AOI_RADIUS" and not 1 <= x <= 5000:
                     raise ValueError("radius must be 1-5000 m")
+                if k in ("AI_CONTEXT_MAX", "CHAN_PENALTY_MAX") and not 0 <= x <= 10:
+                    raise ValueError("must be 0-10 points")
             elif kind == "int":
                 if int(v) < 0:
                     raise ValueError("must be positive")
@@ -195,7 +201,6 @@ class State:
         self.history = deque(maxlen=int(HISTORY_S / HISTORY_STEP_S))
         self.trail = deque(maxlen=TRAIL_POINTS)
         self.devices = {"t": None, "devices": [], "error": None}
-        self.notifications = deque(maxlen=50)
         self.health = {"vllm": None, "envelope": None}
         self.containers = {}
         self.job = {"running": False, "rc": None, "cmd": None, "t": None}
@@ -233,7 +238,6 @@ class State:
                 "record_age_s": round(now - self.record_t, 1) if self.record_t else None,
                 "fps": rate, "n_frames": self.n_frames, "tap": dict(self.tap),
                 "devices": dict(self.devices),
-                "notifications": list(self.notifications)[-15:],
                 "health": dict(self.health), "containers": dict(self.containers),
                 "job": dict(self.job), "now": now,
             }
@@ -359,16 +363,6 @@ def log_follower(state, src, container):
             last_ts, last_meta = ts, None
             msg = clean_line(msg)
             state.add_log(src, ts, msg)
-            if src == "broker":
-                m = NOTIFICATION.search(msg)
-                if m:
-                    try:
-                        event = ast.literal_eval(m.group(2))
-                    except (ValueError, SyntaxError):
-                        event = m.group(2)
-                    with state.lock:
-                        state.notifications.append(
-                            {"ts": ts, "from": m.group(1), "event": event})
         p.wait()
         time.sleep(2)
 
@@ -382,7 +376,7 @@ def run_compose(state, rebuild):
         state.job = {"running": True, "rc": None, "cmd": " ".join(cmd), "t": time.time()}
     state.add_log("compose", datetime.now().isoformat(), "$ " + " ".join(cmd))
     try:
-        p = subprocess.Popen(cmd, cwd=HERE, env=env, stdout=subprocess.PIPE,
+        p = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, text=True, errors="replace",
                              bufsize=1)
         for line in p.stdout:
@@ -398,8 +392,9 @@ def run_compose(state, rebuild):
 
 def geometry_info():
     """Path and bounding box [[s, w], [n, e]] of the geometry the broker uses."""
-    path = effective_settings().get("GEOMETRY_FILE_HOST") or "./geometry.geojson"
-    path = os.path.join(HERE, path) if not os.path.isabs(path) else path
+    # relative paths in compose are relative to the compose file
+    path = effective_settings().get("GEOMETRY_FILE_HOST") or "./files/geometry.geojson"
+    path = os.path.join(ROOT, path) if not os.path.isabs(path) else path
     try:
         with open(path, encoding="utf-8") as f:
             doc = json.load(f)
@@ -500,7 +495,7 @@ def make_handler(state):
                                 "value": eff.get(k, ""), "default": defaults.get(k, ""),
                                 "overridden": k in env}
                                for k, lab, g, kind in SETTINGS],
-                    "geometry": {"path": os.path.relpath(path, HERE), "bbox": bbox}}
+                    "geometry": {"path": os.path.relpath(path, ROOT), "bbox": bbox}}
 
         def _logs(self, q):
             after = int((q.get("after") or ["-1"])[0])

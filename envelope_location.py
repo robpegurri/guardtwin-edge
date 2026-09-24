@@ -77,6 +77,28 @@ def unsubscribe(sub_id):
     log.info("unsubscribed %s", sub_id)
 
 
+def subscriptions():
+    """All the subscriptions of this user id."""
+    r = requests.get(f"{BASE}/subscriptions", headers=HEADERS, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+
+def unsubscribe_sink(sink):
+    """
+    Delete the subscriptions still notifying `sink`: leftovers of earlier
+    runs that could not unsubscribe (killed, crashed, host rebooted), which
+    would otherwise keep sending callbacks for their old areas. The sink is
+    this host's own callback URL, so they can only be ours. Returns how many.
+    """
+    stale = [s["id"] for s in subscriptions() if s.get("sink") == sink]
+    for sub_id in stale:
+        unsubscribe(sub_id)
+    if stale:
+        log.info("removed %d leftover subscription(s) for %s", len(stale), sink)
+    return len(stale)
+
+
 # 2. notifications ---------------------------------------------------------
 
 def start_receiver(port=8080, advertise_host=None):

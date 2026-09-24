@@ -17,6 +17,7 @@
 import argparse
 import logging
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -93,7 +94,17 @@ def main():
     log.info("Startup Phase 1: checking ENVELOPE Devices Location APIs health...")
     loc.wait_alive()
 
+    # `docker stop` (also run by `docker compose up` when the settings change)
+    # sends SIGTERM to this process: make it a normal exit, so that the
+    # finally below stops the broker and unsubscribes. Python's default would
+    # die on the spot, leaving the subscription behind at ENVELOPE.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
     events, sink, stop = loc.start_receiver(args.notify_port, args.notify_host)
+    try:
+        loc.unsubscribe_sink(sink)       # leftovers of runs that could not clean up
+    except Exception as e:
+        log.warning("could not check for leftover subscriptions (%s)", e)
     sub = loc.subscribe(area, sink)
 
     def drain_events():
@@ -121,10 +132,21 @@ def main():
                    "--aoi-lon", str(args.aoi_lon),
                    "--aoi-radius", str(args.aoi_radius)]
         log.info("Startup Phase 3: starting supervision (%s)...", broker_py)
-        result = subprocess.run([sys.executable, broker_py, *aoi_args, *broker_args])
-        return result.returncode
+        broker = subprocess.Popen([sys.executable, broker_py, *aoi_args, *broker_args])
+        try:
+            return broker.wait()
+        finally:
+            if broker.poll() is None:            # we are being stopped
+                broker.terminate()
+                try:
+                    broker.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    broker.kill()
     finally:
-        loc.unsubscribe(sub)
+        try:
+            loc.unsubscribe(sub)
+        except Exception as e:
+            log.warning("could not unsubscribe %s (%s)", sub, e)
         stop()
 
 

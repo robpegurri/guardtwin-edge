@@ -5,11 +5,11 @@ AUXILIARY TOOL FOR GEOMETRY FETCHING
 Downloads static site geometry (buildings, roads, crossings, tram tracks,
 amenities) around a point from 
 OpenStreetMap via the Overpass API and writes it as a GeoJSON FeatureCollection, 
-in the shape broker.py's --geometry-file expects.
+in the shape broker.py's --geometry-file expects. By default it writes
+files/geometry.geojson, the file docker-compose.yml mounts into the broker.
 
-Usage:
-    python3 fetch_geometry.py --lat 45.064924 --lon 7.659707 --radius-m 300 \
-        --out geometry.geojson
+Usage (from the repo root):
+    python3 tools/fetch_geometry.py --lat 45.064924 --lon 7.659707 --radius-m 300
 
 """
 
@@ -17,6 +17,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import sys
 import time
 import urllib.parse
@@ -25,6 +26,8 @@ import urllib.request
 log = logging.getLogger("fetch-geometry")
 
 RETRY_BACKOFF_S = 3.0
+DEFAULT_OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "files", "geometry.geojson")
 
 
 def _bbox_square(center_lat, center_lon, radius_m):
@@ -134,8 +137,9 @@ def main():
     ap.add_argument("--radius-m", type=float, default=300.0,
                     help="half-side, in meters, of the downloaded square "
                          "(total square side = 2x this)")
-    ap.add_argument("--out", default="geometry.geojson",
-                    help="output GeoJSON path")
+    ap.add_argument("--out", default=DEFAULT_OUT,
+                    help="output GeoJSON path (default: the repo's "
+                         "files/geometry.geojson, used by the broker)")
     ap.add_argument("--overpass-url",
                     default="https://overpass-api.de/api/interpreter",
                     help="Overpass API endpoint; point this at a mirror or "

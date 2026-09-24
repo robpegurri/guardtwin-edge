@@ -27,14 +27,15 @@ Also stands up mock AMF/metrics servers, like test_replay.py, but with
 a constant or random channel score (this dataset has no real channel
 log to cycle through).
 
-Usage (run broker.py separately, pointed at this script's mock servers):
+Usage (from the repo root; run broker.py separately, pointed at this
+script's mock servers):
 
-    python3 test_replay_dropmo.py --amf-port 18080 --metrics-port 18081 &
+    python3 tools/test_replay_dropmo.py --amf-port 18080 --metrics-port 18081 &
     python3 broker.py --imsi 001010000167806 \
         --listen-port 30491 --serve-port 30500 \
         --resolver-url http://127.0.0.1:18080 \
         --metrics-url http://127.0.0.1:18081 --gnb-id f01 \
-        --llm-url http://127.0.0.1:8000 --geometry-file geometry.geojson \
+        --llm-url http://127.0.0.1:8000 --geometry-file files/geometry.geojson \
         --aoi-lat 45.0649195 --aoi-lon 7.659724166666667 --aoi-radius 150 \
         --stdout -v
 """
@@ -133,7 +134,9 @@ def build_object(row, ego_lat, ego_lon, heading_deg, mount, dropmo):
     yaw_deg = None
     if yaw_valid and row["yaw_rad"]:
         yaw_vehicle = dropmo.sensor_to_vehicle_yaw(float(row["yaw_rad"]), mount)
-        yaw_enu = dropmo.vehicle_to_enu_yaw(yaw_vehicle, math.radians(heading_deg))
+        # the bike's yaw in ENU (East = 0, counter-clockwise), not its compass heading
+        bike_yaw_enu = math.radians(90.0 - heading_deg)
+        yaw_enu = dropmo.vehicle_to_enu_yaw(yaw_vehicle, bike_yaw_enu)
         yaw_deg = round(dropmo.enu_yaw_to_heading_deg(yaw_enu), 2)
     else:
         yaw_valid = False

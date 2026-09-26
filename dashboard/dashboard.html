@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>GuardTwin Debug</title>
+<title>GuardTwin Dashboard</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <style>
@@ -41,6 +41,13 @@ header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 650; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .dot.ok { background: var(--good); } .dot.warn { background: var(--warning); } .dot.bad { background: var(--critical); }
 .spacer { flex: 1; }
+.pill.rec { border-color: var(--critical); color: var(--critical); font-weight: 600; }
+.pill.rec .dot { background: var(--critical); animation: rec 1.6s ease-in-out infinite; }
+@keyframes rec { 50% { opacity: .25; } }
+.pill.rec { font-variant-numeric: tabular-nums; }
+.recbtn { color: var(--critical); }
+.recbtn.on { background: var(--critical); border-color: var(--critical); color: #fff; }
+@media (prefers-reduced-motion: reduce) { .pill.rec .dot { animation: none; } }
 button, select, input { font: inherit; color: var(--text); }
 button { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
 button:hover { border-color: var(--text-2); }
@@ -48,12 +55,18 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button:disabled { opacity: .5; cursor: default; }
 
 header { flex: none; }
-main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 400px; grid-template-rows: minmax(0, 1.15fr) minmax(0, 1fr); gap: 10px; padding: 10px; }
+main { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 400px; grid-template-rows: minmax(0, 1.15fr) 10px minmax(0, 1fr); column-gap: 10px; padding: 10px; }
 #map { grid-column: 1; grid-row: 1; border-radius: 8px; border: 1px solid var(--border); min-height: 0; }
+/* drag to resize map vs Logs/Settings; double-click: full map <-> last split */
+#split { grid-column: 1; grid-row: 2; cursor: row-resize; display: flex; align-items: center; justify-content: center; touch-action: none; }
+#split::after { content: ""; width: 44px; height: 4px; border-radius: 2px; background: var(--border); }
+#split:hover::after, #split.drag::after { background: var(--text-2); }
+body.resizing { cursor: row-resize; user-select: none; }
+body.resizing #map { pointer-events: none; }
 /* the right column scrolls inside itself when its cards are taller than the window */
-#side { grid-column: 2; grid-row: 1 / span 2; display: flex; flex-direction: column; gap: 10px; min-width: 0; min-height: 0; overflow-y: auto; }
+#side { grid-column: 2; grid-row: 1 / span 3; display: flex; flex-direction: column; gap: 10px; min-width: 0; min-height: 0; overflow-y: auto; }
 #side > .card { flex: none; }
-#bottom { grid-column: 1; grid-row: 2; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+#bottom { grid-column: 1; grid-row: 3; min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; min-width: 0; }
 .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-2); margin: 0 0 8px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .card h2 .right { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--muted); }
@@ -100,6 +113,30 @@ pre.prompt { font: 11px/1.4 var(--mono); background: var(--surface-2); padding: 
 .hzrow .why { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sev { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: var(--text-2); min-width: 58px; }
 .sev .dot { width: 7px; height: 7px; }
+/* devices card */
+.dev { display: grid; grid-template-columns: 10px 1fr auto; gap: 0 8px; align-items: baseline; padding: 5px 0; border-top: 1px solid var(--border); }
+.dev:first-child { border-top: 0; }
+.dev .dot { background: var(--good); align-self: center; }
+.dev .addr { font: 600 12px/1.4 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dev .meta { grid-column: 2 / span 2; color: var(--muted); font-size: 11px; }
+.dev details { grid-column: 2 / span 2; margin: 0; }
+.subhead { display: flex; align-items: baseline; gap: 8px; margin: 10px 0 4px; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-2); }
+.subhead .right { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--muted); }
+.tl { max-height: 150px; overflow-y: auto; border-radius: 6px; background: var(--surface-2); padding: 2px 8px; }
+.tl-row { display: grid; grid-template-columns: 58px 14px minmax(0, 1fr) auto; gap: 6px; align-items: center; padding: 3px 0; font-size: 12px; }
+.tl-row .ts { font: 11px var(--mono); color: var(--muted); }
+.tl-row .arrow { font-size: 10px; text-align: center; }
+.tl-row.entered .arrow { color: var(--good); }
+.tl-row.left .arrow { color: var(--muted); }
+.tl-row.left .addr { color: var(--text-2); }
+.tl-row .addr { font: 12px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-row .chip { margin: 0; }
+.chip.cb { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.tl-sep { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; padding: 4px 0; }
+.tl-sep::before, .tl-sep::after { content: ""; flex: 1; border-top: 1px dashed var(--border); }
+.devstatus { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; font-size: 11px; color: var(--text-2); }
+.devstatus span { display: inline-flex; align-items: center; gap: 5px; }
+.devstatus .dot { width: 7px; height: 7px; }
 .warnbox { border-left: 3px solid var(--warning); background: var(--surface-2); padding: 6px 8px; border-radius: 4px; margin-top: 6px; }
 
 /* bottom tabs */
@@ -114,6 +151,10 @@ pre.prompt { font: 11px/1.4 var(--mono); background: var(--surface-2); padding: 
 .seg button { border: 0; border-radius: 0; border-right: 1px solid var(--border); background: var(--surface); }
 .seg button:last-child { border-right: 0; }
 .seg button.on { background: var(--accent); color: #fff; }
+.seg button:disabled { opacity: .5; }
+#demoCtl { display: inline-flex; align-items: center; gap: 6px; }
+#demoCtl[hidden] { display: none; }
+.note { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
 .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
 #logbox { font: 12px/1.45 var(--mono); flex: 1; min-height: 0; overflow: auto; background: var(--surface-2); border-radius: 6px; padding: 6px 8px; white-space: pre-wrap; word-break: break-all; }
 .ll { display: grid; grid-template-columns: 76px 64px 1fr; gap: 8px; }
@@ -141,7 +182,8 @@ legend { color: var(--text-2); font-weight: 600; padding: 0 4px; }
 
 @media (max-width: 1000px) {
   html, body { overflow: auto; height: auto; }
-  main { display: grid; grid-template-columns: 1fr; grid-template-rows: auto; }
+  main { display: grid; grid-template-columns: 1fr; grid-template-rows: auto !important; row-gap: 10px; }
+  #split { display: none; }
   #bottom { height: 70vh; }
   #map { grid-column: 1; grid-row: auto; height: 55vh; }
   #side, #bottom { grid-column: 1; grid-row: auto; }
@@ -150,25 +192,30 @@ legend { color: var(--text-2); font-weight: 600; padding: 0 4px; }
 </head>
 <body>
 <header>
-  <h1>GuardTwin debug</h1>
-  <span class="pill" id="pTap"><span class="dot"></span><span>broker stream</span></span>
-  <span class="pill" id="pVllm"><span class="dot"></span><span>vLLM</span></span>
-  <span class="pill" id="pEnv"><span class="dot"></span><span>ENVELOPE</span></span>
+  <h1>GuardTwin Dashboard</h1>
+  <span class="pill" id="pTap"><span class="dot"></span><span>Radar stream</span></span>
+  <span class="pill" id="pVllm"><span class="dot"></span><span>LLM</span></span>
+  <span class="pill" id="pEnv"><span class="dot"></span><span>ENVELOPE Location APIs</span></span>
   <span class="pill" id="pC_broker"><span class="dot"></span><span>broker</span></span>
   <span class="pill" id="pC_escalator"><span class="dot"></span><span>escalator</span></span>
   <span class="pill" id="pC_vllm"><span class="dot"></span><span>vllm</span></span>
   <span class="pill" id="pJob" hidden><span class="dot"></span><span></span></span>
   <span class="spacer"></span>
+  <span id="demoCtl" hidden><span class="small muted" id="demoLbl">Demo</span>
+    <span class="seg"><button data-demo="play" title="Resume the simulated ride">▶ Play</button><button data-demo="pause" title="Freeze the scene: the last frame keeps being assessed, the LLM answer stays on screen">⏸ Pause</button></span></span>
+  <span class="pill rec" id="pRec" hidden><span class="dot"></span><span></span></span>
+  <button id="recBtn" class="recbtn">⏺ Record</button>
   <label class="small muted"><input type="checkbox" id="follow" checked> follow bike</label>
   <button id="theme" title="Toggle light/dark">◐</button>
 </header>
 
 <main>
   <div id="map"></div>
+  <div id="split" role="separator" aria-orientation="horizontal" title="Drag to resize · double-click: full map / restore"></div>
 
   <div id="side">
     <section class="card">
-      <h2>Risk score <span class="right" id="riskAge"></span></h2>
+      <h2>Computed risk score <span class="right" id="riskAge"></span></h2>
       <div class="risk-head">
         <div class="risk-score" id="score">–<small> / 10</small></div>
         <div class="level" id="level"></div>
@@ -180,11 +227,10 @@ legend { color: var(--text-2); font-weight: 600; padding: 0 4px; }
         <span><i class="sw" style="background:var(--llm)"></i>AI Context Score</span>
       </div>
       <div id="chartWrap"><canvas id="chart" aria-label="Deterministic, Channel Penalty and AI Context scores over the last 2 minutes, stacked"></canvas><div id="tip"></div></div>
-      <div class="small muted">Last 2 minutes, stacked: the top edge is the total before the 10-point cap.</div>
     </section>
 
     <section class="card">
-      <h2>AI Context Score <span class="right" id="envState"></span></h2>
+      <h2>AI Context Details <span class="right" id="envState"></span></h2>
       <div id="riskFlag"></div>
       <div id="hazards" class="small"></div>
       <div class="stats" id="aiStats" style="margin-top:8px"></div>
@@ -193,13 +239,16 @@ legend { color: var(--text-2); font-weight: 600; padding: 0 4px; }
     </section>
 
     <section class="card">
-      <h2>Channel &amp; bike</h2>
+      <h2>Channel &amp; bike details</h2>
       <div class="kv small" id="chan"></div>
     </section>
 
     <section class="card">
-      <h2>Devices in area (ENVELOPE) <span class="right" id="devAge"></span></h2>
+      <h2>Devices in the AoI<span class="right" id="devAge"></span></h2>
       <div id="devices" class="small"></div>
+      <div class="subhead">Entries &amp; exits<span class="right" id="tlNote"></span></div>
+      <div class="tl" id="devTimeline"></div>
+      <div class="devstatus" id="devStatus"></div>
     </section>
   </div>
 
@@ -216,6 +265,7 @@ legend { color: var(--text-2); font-weight: 600; padding: 0 4px; }
           <button data-src="escalator">Escalator</button>
           <button data-src="vllm">vLLM</button>
           <button data-src="compose">Compose runs</button>
+          <button data-src="demo" id="srcDemo" hidden>Demo</button>
         </div>
         <input type="text" id="logFilter" placeholder="filter text…" style="padding:4px 6px;border:1px solid var(--border);border-radius:5px;background:var(--surface);min-width:180px">
         <label class="small"><input type="checkbox" id="autoscroll" checked> auto-scroll</label>
@@ -260,14 +310,14 @@ try { const t = localStorage.getItem("gt-theme"); if (t) document.documentElemen
 /* ---------------- map ---------------- */
 const map = L.map("map", {zoomControl: true}).setView([45.0641, 7.6598], 17);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 20, maxNativeZoom: 19, attribution: "© OpenStreetMap contributors"}).addTo(map);
+  maxZoom: 20, maxNativeZoom: 19, attribution: "© OpenStreetMap"}).addTo(map);
 const layers = {
   aoi: L.layerGroup().addTo(map), coverage: L.layerGroup().addTo(map), geometry: L.layerGroup(),
   trail: L.layerGroup().addTo(map), objects: L.layerGroup().addTo(map),
   hazards: L.layerGroup().addTo(map), bike: L.layerGroup().addTo(map),
 };
 L.control.layers(null, {
-  "AoI": layers.aoi, "Geometry coverage": layers.coverage, "Site geometry (LLM's map)": layers.geometry,
+  "AoI": layers.aoi, "Geometry coverage": layers.coverage, "AI Context Map)": layers.geometry,
   "Bike trail": layers.trail, "Radar objects": layers.objects, "LLM hazards": layers.hazards,
 }, {collapsed: true}).addTo(map);
 
@@ -508,7 +558,7 @@ function renderEnv(rec, settings) {
   ].map(([v, k, tip]) => `<div class="stat"${tip ? ` title="${esc(tip)}"` : ""}><div class="v">${esc(v)}</div><div class="k">${k}${tip ? " ⓘ" : ""}</div></div>`).join("")
     : `<div class="muted small" style="grid-column:1/-1">Timing metrics need the updated broker image.</div>`);
   const c = env.call;
-  setHTML($("#aiCall"), c ? `<details data-k="call"><summary>Last answer: ${fmtS(c.latency_s)}, asked ${c.lead_m} m ahead, clock ${esc(c.clock)}</summary>
+  setHTML($("#aiCall"), c ? `<details data-k="call"><summary>Last answer: ${fmtS(c.latency_s)}, asked ${c.lead_m} m ahead</summary>
       <div class="muted" style="margin-top:4px">Model answer (raw)</div><pre class="prompt">${esc(c.answer)}</pre>
       <div class="muted">What the model saw (prompt)</div><pre class="prompt">${esc(c.prompt)}</pre></details>` : "");
 }
@@ -524,18 +574,60 @@ function renderChan(rec) {
   ].map(([k, v]) => `<div>${k}</div><div>${esc(v ?? "–")}</div>`).join("");
 }
 
+// escalator log timestamps (RFC 3339, ns) -> Date
+const tsDate = ts => new Date(String(ts).replace(/(\.\d{3})\d*Z$/, "$1Z"));
+const hhmmss = ts => { const d = tsDate(ts); return isNaN(d) ? "" : d.toLocaleTimeString([], {hour12: false}); };
+const ago = (ts, now) => { const s = Math.max(0, Math.round(now - tsDate(ts) / 1000));
+  return s < 60 ? `${s} s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
+const srcChip = src => `<span class="chip${src === "callback" ? " cb" : ""}" title="${src === "callback"
+  ? "Reported by the ENVELOPE subscription callback, as soon as it entered"
+  : "Found by the periodic devices-in-area query"}">${esc(src)}</span>`;
+
 function renderDevices(st) {
-  const d = st.devices || {};
-  $("#devAge").textContent = d.t ? `${Math.round(st.now - d.t)} s ago · maxAge ${d.max_age_s ?? "–"} s` : "";
-  if (d.error) setHTML($("#devices"), `<div class="warnbox">Query failed: ${esc(d.error)}</div>`);
-  else if (!(d.devices || []).length) setHTML($("#devices"), `<span class="muted">No device in the AoI.</span>`);
-  else setHTML($("#devices"), d.devices.map((dev, i) => {
-    const ip = dev.ipv4Address || {};
-    const name = dev.hostname || ip.publicAddress || "device " + (i + 1);
-    return `<div class="hz"><span class="t">${esc(name)}</span>
-      <span class="chip">${esc([ip.publicAddress, ip.privateAddress, ip.publicPort].filter(x => x != null).join(" · "))}</span>
-      <details data-k="dev:${esc(name)}"><summary>raw</summary><pre class="json">${esc(JSON.stringify(dev, null, 1))}</pre></details></div>`;
-  }).join(""));
+  const d = st.devices || {}, tr = st.tracker || {};
+  // raw ENVELOPE entries (the dashboard's own query), matched by public address
+  const raw = new Map((d.devices || []).map(dev => [(dev.ipv4Address || {}).publicAddress, dev]));
+  const rawDetails = (key, dev) => dev ? `<details data-k="dev:${esc(key)}"><summary>raw</summary><pre class="json">${esc(JSON.stringify(dev, null, 1))}</pre></details>` : "";
+  let list;
+  if (tr.known) {
+    // what the escalator warns: its own list, kept by callbacks + queries
+    const cur = [...tr.current].sort((a, b) => a.since < b.since ? 1 : -1);
+    $("#devAge").textContent = `${cur.length} now`;
+    list = cur.length ? cur.map(c => {
+      const dev = raw.get(c.addr.split(/[: ]/)[0]);
+      return `<div class="dev"><span class="dot"></span><span class="addr" title="${esc(c.addr)}">${esc(c.addr)}</span>${srcChip(c.src)}
+        <div class="meta">${dev && dev.hostname ? esc(dev.hostname) + " · " : ""}entered ${hhmmss(c.since)} · ${ago(c.since, st.now)}</div>${rawDetails(c.addr, dev)}</div>`;
+    }).join("") : `<span class="muted">Nobody in the AoI: risk-events wait until someone enters.</span>`;
+  } else {
+    // escalator without device tracking (older image): the dashboard's query
+    $("#devAge").textContent = d.t ? `${Math.round(st.now - d.t)} s ago · maxAge ${d.max_age_s ?? "–"} s` : "";
+    list = d.error ? `<div class="warnbox">Query failed: ${esc(d.error)}</div>`
+      : !(d.devices || []).length ? `<span class="muted">No device in the AoI.</span>`
+      : d.devices.map((dev, i) => { const ip = dev.ipv4Address || {}, name = dev.hostname || ip.publicAddress || "device " + (i + 1);
+          return `<div class="dev"><span class="dot"></span><span class="addr">${esc(name)}</span><span></span>
+            <div class="meta">${esc([ip.publicAddress, ip.privateAddress, ip.publicPort].filter(x => x != null).join(" · "))}</div>${rawDetails(name, dev)}</div>`; }).join("");
+  }
+  setHTML($("#devices"), list);
+
+  const ev = tr.events || [];
+  $("#tlNote").textContent = ev.length ? `last ${ev.filter(e => e.kind !== "restart").length}` : "";
+  setHTML($("#devTimeline"), !tr.known ? `<div class="tl-sep">needs the updated escalator</div>`
+    : ev.length ? ev.map(e => e.kind === "restart"
+        ? `<div class="tl-sep" title="${esc(tsDate(e.t).toLocaleString())}">escalator started · ${hhmmss(e.t)}</div>`
+        : `<div class="tl-row ${e.kind}" title="${esc(tsDate(e.t).toLocaleString())} · ${ago(e.t, st.now)}">
+             <span class="ts">${hhmmss(e.t)}</span><span class="arrow">${e.kind === "entered" ? "▲" : "▼"}</span>
+             <span class="addr">${esc(e.addr)}</span>${srcChip(e.src)}</div>`).join("")
+      : `<div class="tl-sep">no entries or exits yet</div>`);
+
+  const parts = [];
+  if (tr.known) {
+    parts.push(tr.sub ? `<span title="Only this subscription's callbacks are used"><i class="dot ok"></i>subscription ${esc(tr.sub.slice(0, 8))}</span>`
+                      : `<span title="Retrying; the periodic query keeps the list meanwhile"><i class="dot warn"></i>not subscribed</span>`);
+    parts.push(`<span title="Callbacks received from the current subscription">${tr.callbacks} callback${tr.callbacks === 1 ? "" : "s"}</span>`);
+    if (tr.zombies) parts.push(`<span title="Older subscriptions still notifying this host: their callbacks are ignored, and deleting them is retried every minute"><i class="dot warn"></i>${tr.zombies} zombie subscription${tr.zombies === 1 ? "" : "s"}</span>`);
+    if (!tr.query_ok) parts.push(`<span title="The periodic devices-in-area query fails: the list is kept as it was"><i class="dot bad"></i>query failing</span>`);
+  }
+  setHTML($("#devStatus"), parts.join(""));
 }
 
 function setPill(id, cls, text, title) {
@@ -546,18 +638,67 @@ function setPill(id, cls, text, title) {
 function renderPills(st) {
   const tap = st.tap || {};
   setPill("pTap", tap.connected ? (st.record_age_s != null && st.record_age_s < 3 ? "ok" : "warn") : "bad",
-    tap.connected ? `broker stream · ${st.fps.toFixed(1)} fps` : "broker stream · down", tap.error || "");
-  setPill("pVllm", st.health.vllm ? "ok" : st.health.vllm === false ? "bad" : "", "vLLM");
-  setPill("pEnv", st.health.envelope ? "ok" : st.health.envelope === false ? "bad" : "", "ENVELOPE");
+    tap.connected ? `Radar stream · ${st.fps.toFixed(1)} fps` : "Radar stream · down", tap.error || "");
+  setPill("pVllm", st.health.vllm ? "ok" : st.health.vllm === false ? "bad" : "", "LLM Engine");
+  setPill("pEnv", st.health.envelope ? "ok" : st.health.envelope === false ? "bad" : "", "ENVELOPE Location APIs");
   for (const svc of ["broker", "escalator", "vllm"]) {
     const c = (st.containers || {})[svc];
     if (!c) continue;
     setPill("pC_" + svc, c.state === "running" ? "ok" : c.state === "missing" ? "" : "bad", `${svc}: ${c.state}`, c.status);
   }
+  renderRec(st.health.recording, st.now);
   const j = st.job || {};
+  
   if (j.cmd) setPill("pJob", j.running ? "warn" : j.rc === 0 ? "ok" : "bad",
     j.running ? "compose: running…" : `compose: exit ${j.rc}`, j.cmd);
 }
+
+/* ---------------- recording ---------------- */
+const fmtBytes = b => b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : b >= 1e6 ? (b / 1e6).toFixed(b < 1e7 ? 1 : 0) + " MB" : Math.round(b / 1e3) + " kB";
+const fmtDur = s => { s = Math.max(0, Math.floor(s)); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, ss = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${String(m).padStart(2, "0")}:${ss}`; };
+function renderRec(rec, now) {
+  rec = rec || {};
+  const btn = $("#recBtn"), pill = $("#pRec");
+  btn.classList.toggle("on", !!rec.on);
+  btn.textContent = rec.on ? "■ Stop" : "⏺ Record";
+  btn.title = rec.on ? "Stop recording" : "Record every input from outside (radar, 5G core, LLM, ENVELOPE, Risk Escalation) to recordings/, without restarting anything";
+  pill.hidden = !rec.on;
+  if (!rec.on) return;
+  const elapsed = now - (rec.since || now), writing = rec.writing || [];
+  const missing = ["broker", "escalator"].filter(c => !writing.includes(c));
+  const late = missing.length && elapsed > 3;
+  pill.querySelector("span:last-child").textContent = `REC ${fmtDur(elapsed)} · ${fmtBytes(rec.bytes || 0)}${late ? " ⚠" : ""}`;
+  pill.title = `Recording ${rec.id} to recordings/` + (late ? `\n⚠ not writing yet: ${missing.join(", ")}` + (missing.includes("broker") ? " (the broker starts recording once the first radar frame has arrived)" : "")
+    : `\nwriting: ${writing.join(", ") || "starting…"}`) + `\nReplay: python3 tools/replay_recording.py recordings/${rec.id}-broker.ndjson`;
+}
+$("#recBtn").onclick = async () => {
+  const b = $("#recBtn"); b.disabled = true;
+  try {
+    const r = await fetch("/api/record", {method: "POST", headers: {"Content-Type": "application/json", "X-Guardtwin": "1"},
+      body: JSON.stringify({action: b.classList.contains("on") ? "stop" : "start"})});
+    const d = await r.json();
+    if (!r.ok) alert(d.error || "Recording could not be switched");
+    else renderRec(d.recording, Date.now() / 1000);
+  } finally { b.disabled = false; }
+};
+
+/* ---------------- demo mode ---------------- */
+function renderDemo(d) {
+  d = d || {};
+  $("#demoCtl").hidden = !d.enabled; $("#srcDemo").hidden = !d.enabled;
+  if (!d.enabled) return;
+  $("#demoLbl").textContent = !d.running ? "Demo · starting…" : d.paused ? "Demo · paused" : "Demo";
+  for (const b of document.querySelectorAll("#demoCtl button")) {
+    b.disabled = !d.running;
+    b.classList.toggle("on", d.running && (b.dataset.demo === "pause") === !!d.paused);
+  }
+}
+$("#demoCtl").onclick = async e => {
+  const b = e.target.closest("button"); if (!b || b.disabled) return;
+  await fetch("/api/demo", {method: "POST", headers: {"Content-Type": "application/json", "X-Guardtwin": "1"},
+    body: JSON.stringify({action: b.dataset.demo})});
+};
 
 /* ---------------- live stream ---------------- */
 let settingsCache = null;
@@ -576,7 +717,7 @@ function connect() {
       if (history.length > 700) history = history.slice(-600);
       drawBike(rec); drawObjects(rec); drawHazards(rec.env);
     }
-    renderRisk(st); renderEnv(rec, settingsCache); renderChan(rec); renderDevices(st); renderPills(st);
+    renderRisk(st); renderEnv(rec, settingsCache); renderChan(rec); renderDevices(st); renderPills(st); renderDemo(st.demo);
     drawChart();
     if (j_prev_running && !(st.job || {}).running) { loadSettings(); }
     j_prev_running = !!(st.job || {}).running;
@@ -586,12 +727,19 @@ function connect() {
 let j_prev_running = false;
 
 /* ---------------- logs ---------------- */
-let logSrc = "", logSeq = -1, logTimer = null;
+let logSrc = "", logSeq = -1, logTimer = null, logBoot = null;
 const logbox = $("#logbox");
 async function pollLogs() {
   try {
     const r = await fetch(`/api/logs?after=${logSeq}&src=${logSrc}&limit=${logSeq < 0 ? 800 : 1500}`);
     const d = await r.json();
+    if (logBoot && d.boot !== logBoot) {
+      // the dashboard restarted: its line numbers start again from 0, so
+      // "after logSeq" would skip everything; reload the view from scratch
+      logBoot = d.boot; logbox.textContent = ""; logSeq = -1;
+      logTimer = setTimeout(pollLogs, 0); return;
+    }
+    logBoot = d.boot;
     const filt = $("#logFilter").value.toLowerCase(), hideM = $("#hideMetrics").checked;
     const frag = document.createDocumentFragment();
     for (const [seq, src, ts, msg] of d.lines) {
@@ -601,7 +749,7 @@ async function pollLogs() {
       const div = document.createElement("div");
       const lvl = /\b(ERROR|CRITICAL|Traceback)\b/.test(msg) ? " err" : /\bWARN(ING)?\b/.test(msg) ? " warn" : "";
       div.className = "ll" + lvl;
-      div.innerHTML = `<span class="src">${esc(src)}</span><span class="ts">${esc(ts ? new Date(ts).toLocaleTimeString([], {hour12: false}) : "")}</span><span class="msg">${esc(msg)}</span>`;
+      div.innerHTML = `<span class="src">${esc(src)}</span><span class="ts">${esc(ts ? hhmmss(ts) : "")}</span><span class="msg">${esc(msg)}</span>`;
       frag.appendChild(div);
     }
     if (logSeq < 0) logSeq = d.seq;
@@ -621,15 +769,57 @@ $("#logFilter").addEventListener("input", () => { clearTimeout(window._lf); wind
 $("#hideMetrics").onchange = resetLogs;
 $("#logClear").onclick = () => { logbox.textContent = ""; };
 
+/* ---------------- map / bottom panel splitter ---------------- */
+const mainEl = $("main"), splitEl = $("#split");
+const TABS_H = 30, MAP_MIN = 120;             // bottom panel collapses to its tab bar
+let splitF = null, splitLast = 0.55;          // map share of the height; null: CSS default
+try { const v = JSON.parse(localStorage.getItem("gt-split")); if (v) { splitF = v.f; splitLast = v.last || splitLast; } } catch (e) {}
+function splitAvail() { return mainEl.clientHeight - 20 - 10; }      // minus padding and the handle
+function splitMax() { const a = splitAvail(); return a > 0 ? (a - TABS_H) / a : 1; }
+function splitCollapsed() { return splitF != null && splitF >= splitMax() - 0.001; }
+function setSplit(f, save = true) {
+  if (matchMedia("(max-width: 1000px)").matches) return;
+  const a = splitAvail(); if (a <= 0) return;
+  splitF = Math.max(Math.min(MAP_MIN / a, splitMax()), Math.min(f, splitMax()));
+  mainEl.style.gridTemplateRows = `${Math.round(splitF * a)}px 10px minmax(0, 1fr)`;
+  map.invalidateSize(); drawChart();
+  if (!splitCollapsed()) splitLast = splitF;
+  if (save) try { localStorage.setItem("gt-split", JSON.stringify({f: splitF, last: splitLast})); } catch (e) {}
+}
+splitEl.addEventListener("pointerdown", e => {
+  e.preventDefault(); splitEl.setPointerCapture(e.pointerId);
+  splitEl.classList.add("drag"); document.body.classList.add("resizing");
+});
+splitEl.addEventListener("pointermove", e => {
+  if (!splitEl.hasPointerCapture(e.pointerId)) return;
+  const top = mainEl.getBoundingClientRect().top + 10;
+  let f = (e.clientY - top - 5) / splitAvail();
+  if (f > splitMax() - 30 / splitAvail()) f = 1;                     // snap to full map
+  setSplit(f, false);
+});
+const endDrag = e => {
+  if (!splitEl.hasPointerCapture(e.pointerId)) return;
+  splitEl.releasePointerCapture(e.pointerId);
+  splitEl.classList.remove("drag"); document.body.classList.remove("resizing");
+  setSplit(splitF);
+};
+splitEl.addEventListener("pointerup", endDrag);
+splitEl.addEventListener("pointercancel", endDrag);
+splitEl.addEventListener("dblclick", () => setSplit(splitCollapsed() ? splitLast : 1));
+addEventListener("resize", () => { if (splitF != null) setSplit(splitF, false); });
+if (splitF != null) requestAnimationFrame(() => setSplit(splitF, false));
+
 /* ---------------- tabs ---------------- */
 function showTab(name) {
+  if (splitCollapsed()) setSplit(splitLast);
   for (const t of document.querySelectorAll(".tab")) t.classList.toggle("on", t.dataset.tab === name);
   $("#tab-logs").hidden = name !== "logs"; $("#tab-settings").hidden = name !== "settings";
 }
 for (const t of document.querySelectorAll(".tab")) t.onclick = () => showTab(t.dataset.tab);
 
 /* ---------------- settings ---------------- */
-const GROUPS = {aoi: "Area of interest", bike: "Bike", core: "5G core", score: "Score limits", llm: "AI environmental risk", escalation: "Risk escalation", startup: "Startup & ENVELOPE"};
+const GROUPS = {aoi: "Area of interest", bike: "Bike", core: "5G core", score: "Score limits", llm: "AI environmental risk", escalation: "Risk escalation", startup: "Startup & ENVELOPE", demo: "Demo mode"};
+const GROUP_NOTES = {demo: "A simulated bike rides inside the AoI with synthetic radar objects (tools/sim_ride.py), and the broker uses its fake 5G core; turning it off restores the previous core URLs. Play/Pause appear next to “follow bike”. Everything downstream is real, risk-events included."};
 function fieldVal(key) {
   const el = document.getElementById("f_" + key); if (!el) return "";
   return el.type === "checkbox" ? (el.checked ? "1" : "") : el.value.trim();
@@ -677,6 +867,7 @@ async function loadSettings() {
       }
       fs.appendChild(w);
     }
+    if (GROUP_NOTES[g]) fs.insertAdjacentHTML("beforeend", `<p class="note">${esc(GROUP_NOTES[g])}</p>`);
     grid.appendChild(fs);
   }
   grid.oninput = grid.onchange = markDirty;

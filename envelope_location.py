@@ -4,6 +4,7 @@
 
 import json
 import logging
+import secrets
 import socket
 import threading
 import time
@@ -11,6 +12,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from queue import Queue, Empty
 
 import requests
+
+import recorder
 
 log = logging.getLogger("envelope_location")
 
@@ -64,6 +67,8 @@ def subscribe(a, sink, initial_event=True):
     log.debug("POST %s/subscriptions body=%s", BASE, body)
     r = requests.post(f"{BASE}/subscriptions", headers=HEADERS,
                       json=body, timeout=10)
+    recorder.record("envelope", call="subscribe", request=body, status=r.status_code,
+                    body=r.text)
     r.raise_for_status()
     sub_id = r.json()["id"]
     log.info("subscribed %s -> %s (area: %s)", sub_id, sink, a)
@@ -72,8 +77,10 @@ def subscribe(a, sink, initial_event=True):
 
 def unsubscribe(sub_id):
     log.debug("DELETE %s/subscriptions/%s", BASE, sub_id)
-    requests.delete(f"{BASE}/subscriptions/{sub_id}",
-                    headers=HEADERS, timeout=10).raise_for_status()
+    r = requests.delete(f"{BASE}/subscriptions/{sub_id}", headers=HEADERS, timeout=10)
+    recorder.record("envelope", call="unsubscribe", id=sub_id, status=r.status_code,
+                    body=r.text)
+    r.raise_for_status()
     log.info("unsubscribed %s", sub_id)
 
 
@@ -84,26 +91,28 @@ def subscriptions():
     return r.json()
 
 
-def unsubscribe_sink(sink):
+def our_subscriptions(base):
     """
-    Delete the subscriptions still notifying `sink`: leftovers of earlier
-    runs that could not unsubscribe (killed, crashed, host rebooted), which
-    would otherwise keep sending callbacks for their old areas. The sink is
-    this host's own callback URL, so they can only be ours. Returns how many.
+    The subscriptions notifying this host's callback receiver: its sink is
+    `base` (older runs) or `base`/<token> (see start_receiver). The base is
+    this host's own callback URL, so they can only be ours.
     """
-    stale = [s["id"] for s in subscriptions() if s.get("sink") == sink]
-    for sub_id in stale:
-        unsubscribe(sub_id)
-    if stale:
-        log.info("removed %d leftover subscription(s) for %s", len(stale), sink)
-    return len(stale)
+    return [sub for sub in subscriptions()
+            if sub.get("sink") == base or str(sub.get("sink", "")).startswith(base + "/")]
 
 
-# 2. notifications ---------------------------------------------------------
+# 2. callbacks -------------------------------------------------------------
 
-def start_receiver(port=8080, advertise_host=None):
+def start_receiver(on_event, port=8080, advertise_host=None, on_stale=None):
     """
-    Listen for the service's callbacks. Returns (queue, sink_url, stop).
+    Listen for the service's callbacks. Returns (sink, base, stop): subscribe
+    with `sink`; `base` is what every sink of this host starts with.
+
+    Each receiver gets a sink of its own, `base`/<random token>, and hands
+    on_event(event) only the callbacks addressed to it. Callbacks for any
+    other path come from older subscriptions that could not be deleted:
+    acknowledged (so the service does not retry them) and dropped, with
+    on_stale(path).
 
     `advertise_host` is the host ENVELOPE should call back on. Leave it
     unset only when running directly on the host that can reach
@@ -112,7 +121,7 @@ def start_receiver(port=8080, advertise_host=None):
     container's internal bridge IP -- unreachable from ENVELOPE -- so
     the externally-reachable host/IP must be passed explicitly.
     """
-    events = Queue()
+    path = "/notify/" + secrets.token_hex(8)
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -120,12 +129,21 @@ def start_receiver(port=8080, advertise_host=None):
             raw = self.rfile.read(n)
             self.send_response(204)          # ack first, handle after
             self.end_headers()
+            recorder.record("callback", path=self.path, current=self.path == path,
+                            src=self.client_address[0],
+                            body=raw.decode("utf-8", "replace"))
+            if self.path != path:
+                log.debug("callback to %s from %s: not the current subscription, dropped",
+                          self.path, self.client_address[0])
+                if on_stale:
+                    on_stale(self.path)
+                return
             try:
                 event = json.loads(raw)
             except ValueError:
                 event = {"_raw": raw.decode("utf-8", "replace")}
-            log.info("notification from %s: %s", self.client_address[0], event)
-            events.put(event)
+            log.debug("notification from %s: %s", self.client_address[0], event)
+            on_event(event)
 
         def log_message(self, *a):
             pass
@@ -141,9 +159,10 @@ def start_receiver(port=8080, advertise_host=None):
         ip = s.getsockname()[0]
         s.close()
 
-    sink = f"http://{ip}:{port}/notify"
-    log.info("listening for ENVELOPE callbacks on 0.0.0.0:%d (sink: %s)", port, sink)
-    return events, sink, httpd.shutdown
+    base = f"http://{ip}:{port}/notify"
+    log.info("listening for ENVELOPE callbacks on 0.0.0.0:%d (sink: %s%s)",
+             port, base, path[len("/notify"):])
+    return base + path[len("/notify"):], base, httpd.shutdown
 
 
 # 3. query -----------------------------------------------------------------
@@ -168,8 +187,14 @@ def ipv4_addresses_in(a, max_age=60):
     """
     body = {"area": a, "maxAge": max_age}
     log.debug("POST %s/queries body=%s", BASE, body)
-    r = requests.post(f"{BASE}/queries", headers=HEADERS,
-                      json=body, timeout=10)
+    try:
+        r = requests.post(f"{BASE}/queries", headers=HEADERS,
+                          json=body, timeout=10)
+    except Exception as e:
+        recorder.record("envelope", call="query", request=body, error=str(e))
+        raise
+    recorder.record("envelope", call="query", request=body, status=r.status_code,
+                    body=r.text)
     r.raise_for_status()
     addresses = []
     for device in r.json():
@@ -195,7 +220,8 @@ if __name__ == "__main__":
     links = area(45.064924, 7.659707, 150)
 
     wait_alive()
-    events, sink, stop = start_receiver()      # before subscribing
+    events = Queue()
+    sink, _, stop = start_receiver(events.put)      # before subscribing
     sub = subscribe(links, sink)
     print(f"subscribed {sub} -> {sink}")
 

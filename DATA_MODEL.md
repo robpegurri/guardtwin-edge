@@ -135,8 +135,9 @@ Channel Penalty = (Deterministic Score / 10) × CHAN_PENALTY_MAX × (1 − link_
 
 - The penalty scales with the radar risk, so it is **0 when the radar sees
   nothing**, whatever the link.
-- It reaches **`CHAN_PENALTY_MAX`** (default 3 points) only with radar risk 10
-  and a dead link.
+- It reaches **`CHAN_PENALTY_MAX`** (default 2 points) only with radar risk 10
+  and a dead link. The maximum is a tunable, not a fixed part of the model:
+  set it as you wish with `CHAN_PENALTY_MAX` (see [Parameters](#parameters)).
 - **An unknown channel counts as a dead link.** If the AMF or the metrics
   server is unreachable, the penalty is at its maximum for the current radar
   risk. The system errs on the side of caution when it cannot vouch for the
@@ -249,16 +250,20 @@ The hazards then combine **conservatively**:
 AI Context Score = AI_CONTEXT_MAX × (1 − (1 − r₁) × Π_{i≥2} (1 − 0.5 × rᵢ))     r₁ ≥ r₂ ≥ …
 ```
 
-With the default maximum of 2 points, the AI Context Score alone can at most
-raise an empty scene to *low*.
+With the default maximum of 3 points, the AI Context Score alone can at most
+raise an empty scene to *low* (the combined risk stays below 1, so the score
+stays below 3.0). The maximum is a tunable, not a fixed part of the model: set
+it as you wish with `AI_CONTEXT_MAX` (see [Parameters](#parameters)); above 3
+points, the environment alone can reach *medium* or more.
 
 ### 5. When the model is asked
 
 - **Not on a timer.** A new call starts as soon as the previous answer
   arrives, while the bike moves.
 - **Same position, no call.** No new call is made while the bike stays within
-  3 m and 10° of the last question, except every **5 minutes**, because the
-  time of day is part of the context.
+  3 m and 10° of where it was when it last asked (not of the lookahead point
+  below), except every **5 minutes**, because the time of day is part of the
+  context. A frozen scene, such as a paused demo, keeps its answer.
 - **Paused** when no radar frame has arrived for 5 s, or when there is no
   position fix.
 - **Lookahead.** A call takes 0.2–2 s, during which the bike keeps moving. So
@@ -298,8 +303,14 @@ The broker names a **level** from the total score:
 The escalator maps the score to the Risk Escalation Service's **`riskLevel`
 1–5**, as `round(risk_score / 2)` rounding halves up, then clamped to 1–5.
 It sends a risk-event **only when `riskLevel` changes**, addressed to the
-devices the Device Location API reports in the AoI, and skips the event when
-there are none.
+devices in the AoI, and skips the event when there are none (the service
+rejects risk-events without devices): it is then sent as soon as a device
+enters. The list of devices is kept by the escalator itself, so escalating
+never waits on ENVELOPE: the AoI subscription's callbacks add a device as soon
+as it enters, and a devices-in-area query every 5 s (`--devices-refresh-s`,
+with `DEVICES_MAX_AGE_S`) adds and removes them. A device a callback added is
+not removed by a query in the following 10 s, and a failed query leaves the
+list as it is.
 
 > The two scales use different cut points. For example, 5.0 is *high* for
 > the broker but `riskLevel` 3; 7.5 is *critical* but `riskLevel` 4, and
@@ -317,25 +328,30 @@ All numbers below come from the code, with default parameters:
 | parked car | 6 m away, static | 1.3 |
 
 - **Deterministic Score** = 10 × (1 − (1 − 0.786)(1 − 0.090)(1 − 0.130)) = **8.3**
-- **Channel Penalty** = 8.3 / 10 × 3 × (1 − 0.3) = **1.7**
+- **Channel Penalty** = 8.3 / 10 × 2 × (1 − 0.3) = **1.2**
 - **AI Context Score:** the model reports three hazards:
   - a `high` hazard on the path at a `busy` time: min(0.95, 0.75 × 1.0 × 1.4) = 0.95
   - a `medium` hazard on the path, `normal`: 0.45
   - a `low` hazard beside the path, `normal`: 0.2 × 0.6 = 0.12
 
-  AI Context Score = 2 × (1 − 0.05 × (1 − 0.225) × (1 − 0.06)) = **1.9**
-- **Total** = min(10, 8.3 + 1.7 + 1.9) = **10.0**: level *critical*,
+  AI Context Score = 3 × (1 − 0.05 × (1 − 0.225) × (1 − 0.06)) = **2.9**
+- **Total** = min(10, 8.3 + 1.2 + 2.9) = **10.0**: level *critical*,
   `riskLevel` 5.
 
 With the pedestrian alone and no AI hazards, the same frame would score
-0.9 + 0.2 = **1.1** (*low*).
+0.9 + 0.1 = **1.0** (*low*).
 
 ## Parameters
 
+The two maximums are defaults chosen from field tests, not part of the model:
+vary `CHAN_PENALTY_MAX` and `AI_CONTEXT_MAX` as you wish (0–10 each, from the
+dashboard's *Settings* tab or `.env`) to weigh the link and the environment
+more or less against the radar.
+
 | Parameter | Default | Set with |
 |---|---|---|
-| Channel Penalty maximum | 3.0 points | `CHAN_PENALTY_MAX` (compose/.env, dashboard) → `--chan-penalty-max` |
-| AI Context Score maximum | 2.0 points | `AI_CONTEXT_MAX` (compose/.env, dashboard) → `--ai-context-max` |
+| Channel Penalty maximum | 2.0 points | `CHAN_PENALTY_MAX` (compose/.env, dashboard) → `--chan-penalty-max` |
+| AI Context Score maximum | 3.0 points | `AI_CONTEXT_MAX` (compose/.env, dashboard) → `--ai-context-max` |
 | Fixed LLM clock | real time | `LLM_CLOCK` (compose/.env, dashboard) → `--llm-clock` |
 | AI result validity | 12 s | `--llm-stale-s` |
 | LLM pause without frames | 5 s | `--radar-idle-s` |

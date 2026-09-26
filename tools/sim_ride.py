@@ -18,6 +18,10 @@ radar or 5G core:
 Everything downstream is real: the LLM, the escalator, and the risk-events it
 sends to the Risk Escalation Service for the devices really in the AoI.
 
+The dashboard's Demo Mode runs this script with --control, and pauses and
+resumes it from the page: while paused, the last frame is re-sent unchanged
+and the simulated clock (the scripted channel's too) stands still.
+
 Usage (from the repo root; Ctrl-C to stop):
     python3 tools/sim_ride.py
     python3 tools/sim_ride.py --yes --speed 4 --no-core
@@ -46,6 +50,7 @@ log = logging.getLogger("sim-ride")
 M_PER_DEG = 111320.0
 UE_ID = 7
 BROKER = "guardtwin-broker"
+AMF_PORT, METRICS_PORT = 18180, 18181
 
 
 # --------------------------------------------------------------------------
@@ -124,6 +129,7 @@ def make_route(geometry_file, lat, lon, radius):
 class Sim:
     def __init__(self, route, speed):
         self.route, self.speed = route, speed
+        self.t = 0.0                                         # simulated time, s
         self.s, self.dir = 2.0, 1
         self.objects, self.prev_range, self.next_id = {}, {}, 1
         self.timers = {"oncoming": 4.0, "pedestrian": 10.0, "overtake": 30.0}
@@ -136,6 +142,7 @@ class Sim:
         self.next_id += 1
 
     def step(self, dt):
+        self.t += dt
         self.s += self.dir * self.speed * dt
         if self.s >= self.route.length - 1 or self.s <= 1:
             self.dir *= -1                                   # turn around
@@ -205,7 +212,8 @@ class Sim:
 
 
 def channel_score(t, period=60.0, hole=15.0):
-    """Good channel with a `hole` s coverage hole every `period` s."""
+    """Good channel with a `hole` s coverage hole every `period` s. The noise
+    depends on t only, so a paused ride keeps its score."""
     phase, start = t % period, period - hole
     if phase < start - 5:
         base = 8.5
@@ -213,7 +221,7 @@ def channel_score(t, period=60.0, hole=15.0):
         base = 8.5 - (phase - (start - 5)) / 5 * 7.0         # 5 s ramp down
     else:
         base = 1.5
-    return max(0.0, min(10.0, base + random.uniform(-0.4, 0.4)))
+    return max(0.0, min(10.0, base + random.Random(round(t, 1)).uniform(-0.4, 0.4)))
 
 
 # --------------------------------------------------------------------------
@@ -249,6 +257,15 @@ def broker_gateway_ip():
         return None
 
 
+def fake_core_urls(amf_port=AMF_PORT, metrics_port=METRICS_PORT):
+    """(AMF URL, metrics URL) of the fake core, or None if the broker's
+    network cannot be found."""
+    gw = broker_gateway_ip()
+    if gw is None:
+        return None
+    return f"http://{gw}:{amf_port}", f"http://{gw}:{metrics_port}"
+
+
 def broker_args():
     try:
         out = subprocess.run(["docker", "inspect", BROKER, "--format", "{{json .Args}}"],
@@ -259,7 +276,7 @@ def broker_args():
         return None
 
 
-def point_broker_at_fake_core(amf_url, metrics_url, assume_yes):
+def point_broker_at_fake_core(amf_url, metrics_url, assume_yes, compose_dir=ROOT):
     """Make the deployed broker use the fake AMF/metrics; True if it does."""
     args = broker_args()
     if args is None:
@@ -277,8 +294,9 @@ def point_broker_at_fake_core(amf_url, metrics_url, assume_yes):
     settings.write_env({"RESOLVER_URL": amf_url, "METRICS_URL": metrics_url})
     env = {k: v for k, v in os.environ.items() if k not in settings.SETTING_KEYS
            and k not in ("RESOLVER_URL", "METRICS_URL")}
+    env["PWD"] = compose_dir
     rc = subprocess.run(["docker", "compose", "up", "-d", "broker", "escalator"],
-                        cwd=ROOT, env=env).returncode
+                        cwd=compose_dir, env=env).returncode
     if rc != 0:
         log.error("docker compose failed (exit %d)", rc)
         return False
@@ -304,6 +322,18 @@ def check_reachable_from_broker(amf_url):
     return False
 
 
+def read_commands(paused):
+    """--control: 'pause' / 'play' lines on stdin."""
+    for line in sys.stdin:
+        cmd = line.strip().lower()
+        if cmd == "pause" and not paused.is_set():
+            paused.set()
+            log.info("paused: re-sending the last frame")
+        elif cmd == "play" and paused.is_set():
+            paused.clear()
+            log.info("resumed")
+
+
 # --------------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
@@ -315,12 +345,19 @@ def main():
                     help="broker UDP port (default: the compose UDP_INGEST_PORT)")
     ap.add_argument("--no-core", action="store_true",
                     help="bike and radar only: no fake AMF/metrics")
-    ap.add_argument("--amf-port", type=int, default=18180)
-    ap.add_argument("--metrics-port", type=int, default=18181)
+    ap.add_argument("--amf-port", type=int, default=AMF_PORT)
+    ap.add_argument("--metrics-port", type=int, default=METRICS_PORT)
     ap.add_argument("--yes", action="store_true",
                     help="switch the broker to the fake core without asking")
+    ap.add_argument("--control", action="store_true",
+                    help="read 'pause' / 'play' lines from stdin (the "
+                         "dashboard's Demo Mode); implies --yes")
+    ap.add_argument("--compose-dir", default=ROOT,
+                    help="directory to run docker compose from (the "
+                         "repository's host path, when run in a container)")
     ap.add_argument("--seed", type=int, default=None)
     args = ap.parse_args()
+    args.yes = args.yes or args.control
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     random.seed(args.seed)
@@ -337,8 +374,7 @@ def main():
                 "to %s for the devices really in the AoI",
                 cfg.get("RISK_ESCALATION_URL") or "the Risk Escalation Service")
 
-    t0 = time.monotonic()
-    clock = lambda: time.monotonic() - t0
+    clock = lambda: sim.t
     if not args.no_core:
         gw = broker_gateway_ip()
         if gw is None:
@@ -354,17 +390,26 @@ def main():
         amf_url = f"http://{gw}:{args.amf_port}"
         metrics_url = f"http://{gw}:{args.metrics_port}"
         log.info("fake AMF on %s, fake metrics on %s", amf_url, metrics_url)
-        if point_broker_at_fake_core(amf_url, metrics_url, args.yes):
+        if point_broker_at_fake_core(amf_url, metrics_url, args.yes, args.compose_dir):
             check_reachable_from_broker(amf_url)
 
+    paused = threading.Event()
+    if args.control:
+        threading.Thread(target=read_commands, args=(paused,), daemon=True).start()
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    dt, seq, nxt = 1.0 / args.rate, 0, time.monotonic()
+    dt, seq, nxt, frame = 1.0 / args.rate, 0, time.monotonic(), None
     try:
         while not args.duration_s or clock() < args.duration_s:
-            sim.step(dt)
-            sock.sendto(json.dumps(sim.frame(seq, dt)).encode(), (args.broker_host, port))
+            if paused.is_set() and frame is not None:
+                # the same scene, still arriving: the broker keeps assessing it
+                frame = dict(frame, seq=seq, t_capture_us=int(time.time() * 1e6))
+            else:
+                sim.step(dt)
+                frame = sim.frame(seq, dt)
+            sock.sendto(json.dumps(frame).encode(), (args.broker_host, port))
             seq += 1
-            if seq % int(10 * args.rate) == 0:
+            if seq % int(10 * args.rate) == 0 and not paused.is_set():
                 log.info("t=%.0fs, %d frames sent, %d object(s) around, channel %.1f",
                          clock(), seq, len(sim.objects),
                          channel_score(clock()) if not args.no_core else float("nan"))

@@ -16,6 +16,7 @@ Split of work:
 broker.py only uses: add_arguments(), load_geometry(), EnvRiskEstimator.
 """
 
+import hashlib
 import json
 import logging
 import math
@@ -29,6 +30,8 @@ from collections import deque
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import recorder
+
 log = logging.getLogger("broker.env-risk")
 
 
@@ -38,7 +41,7 @@ log = logging.getLogger("broker.env-risk")
 # Contribution to the 0-10 risk score. Additive and independent of the radar
 # (an empty scene next to a blind corner still gets some risk), but capped
 # low enough that it alone can never move the level past "low".
-ENV_RISK_BOOST_MAX = 2.0
+ENV_RISK_BOOST_MAX = 3.0
 SEVERITY = {"low": 0.2, "medium": 0.45, "high": 0.75}   # per hazard, 0-1
 # ...times where the feature the hazard cites is (see describe_surroundings)
 GROUP_WEIGHT = {"path": 1.0, "beside": 0.6, "elsewhere": 0.2}
@@ -85,7 +88,7 @@ SYSTEM_PROMPT = """\
 You assess the surroundings of a cyclist for a bicycle safety system.
 You get the local date and time, the cyclist's heading and speed, and the
 mapped features around them, numbered, each with its distance and direction
-relative to where the cyclist is going.
+relative to where the cyclist is going. The site is in Italy.
 A radar tracks the vehicles and people actually there: do not guess about them.
 Report the hazards that the layout of the place creates for the next few
 seconds of riding, at this time of day.
@@ -95,7 +98,7 @@ at another: judge how busy each place usually is right now (schools at entry
 and exit times on school days, universities during term, bus stops at rush
 hour, shops, cafes and bars in their usual hours, everything quieter at night,
 on Sundays and on holidays) and whether it is dark (unlit roads, corners that
-are even harder to see). When the time matters, say so in the evidence.
+are even harder to see). When the time matters, say so in the evidence. 
 
 Hazard types:
 - blind_corner: a building close to the cyclist's path right next to a junction
@@ -577,9 +580,20 @@ def call_llm(args, system_msg, user_msg):
     req = urllib.request.Request(
         f"{args.llm_url}/v1/chat/completions", data=body, method="POST",
         headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=args.llm_http_timeout) as r:
-        doc = json.load(r)
-    return doc["choices"][0]["message"]["content"]
+    sys_key = hashlib.sha256(system_msg.encode()).hexdigest()[:12]
+    recorder.record_once("llm_system", sys_key, text=system_msg)
+    t0 = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=args.llm_http_timeout) as r:
+            doc = json.load(r)
+        answer = doc["choices"][0]["message"]["content"]
+    except Exception as e:
+        recorder.record("llm", system=sys_key, user=user_msg, error=str(e),
+                        latency_s=round(time.monotonic() - t0, 3))
+        raise
+    recorder.record("llm", system=sys_key, user=user_msg, answer=answer,
+                    latency_s=round(time.monotonic() - t0, 3))
+    return answer
 
 
 def parse_hazards(text, items):
@@ -671,7 +685,7 @@ class EnvRiskEstimator:
         self._lock = threading.Lock()
         self._pose = None            # latest pose from the radar frames
         self._pose_mono = None
-        self._result = None          # {"pose", "hazards", "points", "mono", "asked"}
+        self._result = None          # {"pose", "from", "hazards", "points", "mono", "asked"}
         self._latency_s = LATENCY_INIT_S   # running average, for the lookahead
         self._clock = site_clock(args)
         self._calls = deque(maxlen=60)     # (start mono, latency s, ok), for stats
@@ -707,7 +721,10 @@ class EnvRiskEstimator:
                 continue
 
             if result is not None:
-                dist, turn = _moved(self.geo, pose, result["pose"])
+                # From where the bike was when it asked, not from the lookahead
+                # point: a bike standing still with a stale speed would
+                # otherwise be re-asked about the same scene over and over
+                dist, turn = _moved(self.geo, pose, result["from"])
                 if (dist < SAME_POSE_M and turn < SAME_HEADING_DEG
                         and time.monotonic() - result["asked"] < TIME_REFRESH_S):
                     # Still where the last answer was computed: it stays valid
@@ -745,7 +762,7 @@ class EnvRiskEstimator:
                     "clock": f"{now:%a %d %b %Y %H:%M}", "prompt": user_msg,
                     "answer": raw.strip()}
             with self._lock:
-                self._result = {"pose": query, "hazards": hazards,
+                self._result = {"pose": query, "from": pose, "hazards": hazards,
                                 "points": points, "mono": time.monotonic(),
                                 "asked": t0, "call": call}
             log.info("LLM %.1fs, asked %.0f m ahead -> %.1f pts: %s",

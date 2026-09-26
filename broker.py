@@ -14,6 +14,7 @@ import urllib.request
 from datetime import datetime
 
 import ai_assess
+import recorder
 
 log = logging.getLogger("broker")
 
@@ -47,7 +48,9 @@ class NetworkState:
         url = f"{self.args.resolver_url}/api/v1/ue/{supi}"
         try:
             with urllib.request.urlopen(url, timeout=self.args.http_timeout) as r:
-                doc = json.load(r)
+                body = r.read()
+            recorder.record("amf", url=url, status=200, body=body.decode("utf-8", "replace"))
+            doc = json.loads(body)
             with self._lock:
                 ue.ue_id = doc.get("ranUeNgapID")
                 ue.cm_state = doc.get("cmState")
@@ -55,11 +58,14 @@ class NetworkState:
                      supi, ue.ue_id, ue.cm_state)
         except urllib.error.HTTPError as e:
             # 404 & co.: the UE is not registered right now
+            recorder.record("amf", url=url, status=e.code,
+                            body=e.read().decode("utf-8", "replace"))
             with self._lock:
                 ue.ue_id, ue.cm_state = None, None
             log.warning("AMF: %s not registered (HTTP %s)", supi, e.code)
         except Exception as e:
             # network error: keep the last known ue_id, it is our best guess
+            recorder.record("amf", url=url, error=str(e))
             log.warning("AMF unreachable (%s): keeping ue_id=%s for %s",
                         e, ue.ue_id, ue.imsi)
 
@@ -73,8 +79,17 @@ class NetworkState:
                f"/ran_ngap_ue_id/{ue_id}/score")
         try:
             with urllib.request.urlopen(url, timeout=self.args.http_timeout) as r:
-                doc = json.load(r)
+                body = r.read()
+            recorder.record("metrics", url=url, status=200,
+                            body=body.decode("utf-8", "replace"))
+            doc = json.loads(body)
+        except urllib.error.HTTPError as e:
+            recorder.record("metrics", url=url, status=e.code,
+                            body=e.read().decode("utf-8", "replace"))
+            log.warning("metrics unreachable (%s)", e)
+            return
         except Exception as e:
+            recorder.record("metrics", url=url, error=str(e))
             log.warning("metrics unreachable (%s)", e)
             return
         if not isinstance(doc, dict) or "Score" not in doc:
@@ -229,7 +244,7 @@ CLASS_WEIGHT = {"TRUCK": 1.0, "CAR": 0.9, "SCOOTER": 0.7, "BICYCLE": 0.6,
 TTC_MIN_S, TTC_MAX_S = 1.5, 8.0     # full risk .. no risk
 PROX_MAX_M = 30.0                   # beyond this an obstacle is ignored
 STATIC_DAMP = 0.5
-CHAN_PENALTY_MAX = 3.0              # default --chan-penalty-max: points added
+CHAN_PENALTY_MAX = 2.0              # default --chan-penalty-max: points added
                                      # at radar risk 10 with a dead link
 YAW_BOOST_MAX = 0.15                # extra risk (0-1 object scale) for an object
                                      # whose confirmed direction of motion (DROPMO
@@ -431,12 +446,23 @@ def main():
                     help="also append fused frames to this JSON Lines file")
     ap.add_argument("--stdout", action="store_true",
                     help="print each fused frame to stdout")
+    ap.add_argument("--record-dir", default=None,
+                    help="where to record every input (radar datagrams, "
+                         "AMF/metrics answers, LLM calls) while the dashboard's "
+                         "Record button is on (see recorder.py)")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+    if args.record_dir:
+        clock = ai_assess.site_clock(args)
+        recorder.configure(args.record_dir, "broker", lambda: dict(
+            args=vars(args),
+            geometry=recorder.snapshot_file(args.geometry_file, args.record_dir),
+            llm_clock_now=clock().isoformat()))
 
     geometry = ai_assess.load_geometry(args.geometry_file, args.geometry_max_bytes)
 
@@ -466,6 +492,11 @@ def main():
     try:
         while True:
             data, addr = rx.recvfrom(65535)
+            if recorder.enabled():
+                try:
+                    recorder.record("radar", src=addr[0], data=data.decode("utf-8"))
+                except UnicodeDecodeError:
+                    recorder.record("radar", src=addr[0], data_hex=data.hex())
             try:
                 frame = json.loads(data.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as e:
@@ -494,6 +525,13 @@ def main():
                 tx.sendto(payload.encode(), (args.escalator_host, args.escalator_port))
             if out_file:
                 out_file.write(payload + "\n")
+            if recorder.enabled():
+                # the output, compact: what a replay is compared against
+                recorder.record("out", seq=record["seq"], risk_score=record["risk_score"],
+                                radar_risk=record["radar_risk"],
+                                chan_penalty=record["chan_penalty"],
+                                ai_env_risk=record["ai_env_risk"],
+                                env_state=record["env"]["state"])
             if args.stdout:
                 print(payload, flush=True)
             n_rx += 1

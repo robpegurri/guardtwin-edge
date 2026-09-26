@@ -9,20 +9,27 @@ Host-side web page for debugging the edge stack at a glance:
   - ENVELOPE devices-in-area: the current query result for the AoI;
   - settings (AoI and the main compose variables): written to .env, then
     `docker compose up -d broker escalator`;
-  - the raw logs of broker, escalator and vLLM, together or one at a time.
+  - the raw logs of broker, escalator and vLLM, together or one at a time;
+  - Demo Mode (Settings): runs tools/sim_ride.py, with Play/Pause on the page.
 
-Runs on the host (it needs the docker CLI) and listens on localhost only:
-open it through VS Code port forwarding or an SSH tunnel.
+Started by compose with the rest of the stack (the `dashboard` service, with
+the docker socket and the repository mounted), or by hand on the host (it
+needs the docker CLI). It listens on all interfaces, so it can be opened from
+the local network at http://<server-ip>:8095 (--host 127.0.0.1 restricts it
+to localhost again).
 
-    python3 dashboard/dashboard.py [--port 8095]
+    python3 dashboard/dashboard.py [--host 0.0.0.0] [--port 8095]
 """
 
 import argparse
+import ipaddress
 import json
 import logging
 import math
 import os
 import re
+import secrets
+import signal
 import socket
 import subprocess
 import sys
@@ -45,6 +52,7 @@ log = logging.getLogger("dashboard")
 COMPOSE_FILE = os.path.join(ROOT, "docker-compose.yml")
 ENV_FILE = os.path.join(ROOT, ".env")
 PAGE = os.path.join(HERE, "dashboard.html")
+SIM_RIDE = os.path.join(ROOT, "tools", "sim_ride.py")
 
 CONTAINERS = {"broker": "guardtwin-broker", "escalator": "guardtwin-escalator",
               "vllm": "guardtwin-vllm"}
@@ -70,8 +78,20 @@ SETTINGS = [
     ("NOTIFY_HOST", "ENVELOPE callback host", "startup", "text"),
     ("NOTIFY_PORT", "ENVELOPE callback port", "startup", "int"),
     ("DEVICES_MAX_AGE_S", "Devices max age (s)", "startup", "int"),
+    ("DEMO_MODE", "Enable Demo Mode", "demo", "flag"),
 ]
+RECORDINGS = os.path.join(ROOT, "recordings")      # the Record button (recorder.py)
+# The 5G core the broker used before Demo Mode pointed it at the fake one,
+# restored when Demo Mode is turned off ("default": the compose default)
+CORE_KEYS = ("RESOLVER_URL", "METRICS_URL")
+
 SETTING_KEYS = {k for k, *_ in SETTINGS}
+# Log sequence numbers restart from 0 with each run: pages tell runs apart by this
+BOOT_ID = secrets.token_hex(4)
+# Set by the dashboard compose service: our own container, whose mounts tell
+# where the repository is on the host
+SELF_CONTAINER = os.environ.get("DASHBOARD_CONTAINER")
+COMPOSE_DIR = ROOT       # where compose runs from; see host_root()
 
 HISTORY_S = 300          # risk components kept for the chart
 HISTORY_STEP_S = 0.5
@@ -134,9 +154,18 @@ def write_env(updates):
             continue
         out.append(line)
     out += [f"{k}={v}" for k, v in updates.items() if k not in done and v != ""]
+    # Keep the file's owner: in the compose service we run as root
+    try:
+        st = os.stat(ENV_FILE)
+    except FileNotFoundError:
+        st = os.stat(ROOT)
     tmp = ENV_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write("\n".join(out) + "\n")
+    try:
+        os.chown(tmp, st.st_uid, st.st_gid)
+    except OSError:
+        pass
     os.replace(tmp, ENV_FILE)
 
 
@@ -206,6 +235,11 @@ class State:
         self.job = {"running": False, "rc": None, "cmd": None, "t": None}
         self.logs = deque(maxlen=LOG_LINES)
         self.log_seq = 0
+        self.demo = {"enabled": False, "running": False, "paused": False}
+        # the escalator's device list, rebuilt from its "devices" log lines
+        self.tracker = {"known": False, "sub": None, "callbacks": 0, "zombies": 0,
+                        "query_ok": True, "current": {}, "events": deque(maxlen=80),
+                        "last_ts": ""}
 
     def add_log(self, src, ts, text):
         with self.lock:
@@ -239,7 +273,10 @@ class State:
                 "fps": rate, "n_frames": self.n_frames, "tap": dict(self.tap),
                 "devices": dict(self.devices),
                 "health": dict(self.health), "containers": dict(self.containers),
-                "job": dict(self.job), "now": now,
+                "job": dict(self.job), "demo": dict(self.demo),
+                "tracker": dict(self.tracker, current=list(self.tracker["current"].values()),
+                                events=list(self.tracker["events"])[::-1]),
+                "now": now,
             }
 
 
@@ -327,12 +364,121 @@ def health_poller(state):
         with state.lock:
             state.health["vllm"] = vllm
             state.containers = containers
+        update_recording(state)
         time.sleep(5)
+
+
+# --------------------------------------------------------------------------
+# Recording: the Record button writes recordings/control.json, which broker
+# and escalator follow (recorder.py)
+# --------------------------------------------------------------------------
+def read_control():
+    try:
+        with open(os.path.join(RECORDINGS, "control.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def write_control(doc):
+    os.makedirs(RECORDINGS, exist_ok=True)
+    path = os.path.join(RECORDINGS, "control.json")
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(doc, f)
+    try:                                     # the directory's owner, not root
+        st = os.stat(RECORDINGS)
+        os.chown(tmp, st.st_uid, st.st_gid)
+    except OSError:
+        pass
+    os.replace(tmp, path)                    # the recorders never see half a file
+
+
+def update_recording(state):
+    ctl = read_control()
+    rec = {"on": bool(ctl.get("on")), "id": ctl.get("id"), "since": ctl.get("since"),
+           "bytes": 0, "writing": []}
+    if rec["on"] and rec["id"] and os.path.isdir(RECORDINGS):
+        for e in os.scandir(RECORDINGS):
+            if e.name.startswith(rec["id"] + "-") and e.name.endswith(".ndjson"):
+                rec["bytes"] += e.stat().st_size
+                comp = e.name[len(rec["id"]) + 1:-len(".ndjson")].split("-r")[0]
+                if comp not in rec["writing"]:
+                    rec["writing"].append(comp)
+    with state.lock:
+        state.health["recording"] = rec
+
+
+def set_recording(state, on):
+    if on:
+        now = time.time()
+        write_control({"on": True, "id": time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now)),
+                       "since": now})
+    else:
+        write_control(dict(read_control(), on=False, stopped=time.time()))
+    update_recording(state)
 
 
 def clean_line(text):
     text = ANSI.sub("", text.rstrip("\n"))
     return text.split("\r")[-1]          # progress bars: keep the final state
+
+
+def ts_key(ts):
+    """A docker log timestamp, comparable as text: docker drops the trailing
+    zeros of the nanoseconds, so "…35.93528Z" would sort after "…35.9352801Z"."""
+    head, dot, frac = ts.rstrip("Z").partition(".")
+    return f"{head}.{frac:0<9}" if dot else f"{head}.000000000"
+
+
+DEVICES_LINE = re.compile(r"\sdevices (?:INFO|WARNING) (.*)$")
+
+
+def on_devices_line(state, ts, msg):
+    """Follow the escalator's device list (DeviceTracker in escalator.py)
+    through its "devices" log lines; ts orders them (and skips repeats)."""
+    m = DEVICES_LINE.search(msg)
+    if not m:
+        return
+    text, tr = m.group(1), state.tracker
+    with state.lock:
+        if ts_key(ts) <= tr["last_ts"]:
+            return
+        tr["last_ts"] = ts_key(ts)
+        if text == "tracking started":
+            tr.update(known=True, sub=None, callbacks=0, zombies=0, query_ok=True, current={})
+            tr["events"].append({"t": ts, "kind": "restart"})
+        elif (e := re.fullmatch(r"(entered|left) (.+) \((callback|query)\)", text)):
+            kind, addr, src = e.groups()
+            if kind == "entered":
+                tr["current"][addr] = {"addr": addr, "src": src, "since": ts}
+            else:
+                tr["current"].pop(addr, None)
+            tr["events"].append({"t": ts, "kind": kind, "addr": addr, "src": src})
+        elif (e := re.fullmatch(r"subscribed (\S+)", text)):
+            tr["sub"] = e.group(1)
+        elif text.startswith("callback: "):
+            tr["callbacks"] += 1
+        elif (e := re.match(r"zombie subscriptions: (\d+)", text)):
+            tr["zombies"] = int(e.group(1))
+        elif text.startswith("devices-in-area query failed"):
+            tr["query_ok"] = False
+        elif text.startswith("devices-in-area query works again"):
+            tr["query_ok"] = True
+
+
+def seed_devices(state, container):
+    """The device list so far, from the escalator's whole log: the log panel
+    only loads its last lines."""
+    try:
+        out = subprocess.run(["docker", "logs", "--timestamps", container],
+                             capture_output=True, text=True, errors="replace", timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    for raw in sorted((out.stdout + out.stderr).splitlines()):   # by timestamp
+        ts, _, msg = raw.partition(" ")
+        if " devices " in msg:
+            on_devices_line(state, ts, msg)
 
 
 def log_follower(state, src, container):
@@ -358,13 +504,44 @@ def log_follower(state, src, container):
                     state.add_log(src, "", f"[dashboard] {meta}")
                     last_meta = meta
                 continue
-            if last_ts and ts <= last_ts:
+            if last_ts and ts_key(ts) <= ts_key(last_ts):
                 continue                         # overlap after a resume
             last_ts, last_meta = ts, None
             msg = clean_line(msg)
             state.add_log(src, ts, msg)
+            if src == "escalator":
+                on_devices_line(state, ts, msg)
         p.wait()
         time.sleep(2)
+
+
+def host_root():
+    """The host path of the repository. In the compose service it is mounted
+    at ROOT, but compose must run from its host path: the relative paths in
+    docker-compose.yml (bind mounts, build contexts) are sent to the docker
+    daemon, which resolves them on the host. That path is made valid in here
+    too, as a symlink to ROOT."""
+    if not SELF_CONTAINER:
+        return ROOT
+    try:
+        out = subprocess.run(["docker", "inspect", "--format", "{{json .Mounts}}",
+                              SELF_CONTAINER], capture_output=True, text=True,
+                             timeout=10)
+        mounts = json.loads(out.stdout) if out.returncode == 0 else []
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        mounts = []
+    src = next((m["Source"] for m in mounts if m.get("Destination") == ROOT), None)
+    if not src:
+        log.warning("cannot find the host path of %s: Settings may not apply", ROOT)
+        return ROOT
+    try:
+        if not os.path.lexists(src):
+            os.makedirs(os.path.dirname(src), exist_ok=True)
+            os.symlink(ROOT, src)
+    except OSError as e:
+        log.warning("cannot link %s to %s (%s): Settings may not apply", src, ROOT, e)
+        return ROOT
+    return src
 
 
 def run_compose(state, rebuild):
@@ -372,11 +549,12 @@ def run_compose(state, rebuild):
     # .env must win: drop these variables from our own environment, which
     # compose would otherwise prefer over .env
     env = {k: v for k, v in os.environ.items() if k not in SETTING_KEYS}
+    env["PWD"] = COMPOSE_DIR
     with state.lock:
         state.job = {"running": True, "rc": None, "cmd": " ".join(cmd), "t": time.time()}
     state.add_log("compose", datetime.now().isoformat(), "$ " + " ".join(cmd))
     try:
-        p = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE,
+        p = subprocess.Popen(cmd, cwd=COMPOSE_DIR, env=env, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, text=True, errors="replace",
                              bufsize=1)
         for line in p.stdout:
@@ -388,6 +566,113 @@ def run_compose(state, rebuild):
     state.add_log("compose", datetime.now().isoformat(), f"[dashboard] exit code {rc}")
     with state.lock:
         state.job = dict(state.job, running=False, rc=rc)
+
+
+# --------------------------------------------------------------------------
+# Demo Mode: tools/sim_ride.py, while DEMO_MODE is set in .env
+# --------------------------------------------------------------------------
+def demo_core_env(on):
+    """.env changes for turning Demo Mode on (the broker uses sim_ride.py's
+    fake AMF/metrics; the current ones are saved) or off (they come back)."""
+    env = read_env()
+    if not on:
+        out = {}
+        for k in CORE_KEYS:
+            prev = env.get("DEMO_PREV_" + k)
+            if prev is not None:
+                out[k] = "" if prev == "default" else prev
+                out["DEMO_PREV_" + k] = ""
+        return out
+    out = {"DEMO_PREV_" + k: env.get(k) or "default" for k in CORE_KEYS}
+    sys.path.insert(0, os.path.dirname(SIM_RIDE))
+    import sim_ride
+    urls = sim_ride.fake_core_urls()
+    if urls:                     # else sim_ride.py switches them once it runs
+        out.update(zip(CORE_KEYS, urls))
+    return out
+
+
+class Demo:
+    """Keeps sim_ride.py running while Demo Mode is on (and no compose run is
+    in progress), stops it when it is turned off, restarts it when the
+    settings it rides by change (e.g. the AoI moved); relays Play/Pause."""
+    RETRY_S = 10.0
+    # read by sim_ride.py once, at startup
+    RIDE_KEYS = ("AOI_LAT", "AOI_LON", "AOI_RADIUS", "GEOMETRY_FILE_HOST", "UDP_INGEST_PORT")
+
+    def __init__(self, state):
+        self.state, self.proc, self.t_start, self.paused = state, None, 0.0, False
+        self.ride_cfg = None
+        self.lock = threading.Lock()
+
+    def run(self):
+        while True:
+            cfg = effective_settings()
+            on = bool(cfg.get("DEMO_MODE"))
+            ride_cfg = {k: cfg.get(k) for k in self.RIDE_KEYS}
+            with self.state.lock:
+                busy = self.state.job["running"]
+            with self.lock:
+                alive = self.proc is not None and self.proc.poll() is None
+                if on and alive and not busy and ride_cfg != self.ride_cfg:
+                    # after the compose run: the broker already has the new AoI
+                    self.state.add_log("demo", datetime.now().isoformat(),
+                                       "[dashboard] ride settings changed, restarting sim_ride.py")
+                    self._stop()
+                    alive = False
+                    self.t_start = 0.0
+                if on and not alive and not busy and time.time() - self.t_start > self.RETRY_S:
+                    self._start(ride_cfg)
+                elif not on and alive:
+                    self._stop()
+                alive = self.proc is not None and self.proc.poll() is None
+                with self.state.lock:
+                    self.state.demo = {"enabled": on, "running": alive,
+                                       "paused": alive and self.paused}
+            time.sleep(1)
+
+    def _stop(self):
+        self.proc.send_signal(signal.SIGINT)
+        try:
+            self.proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+
+    def _start(self, ride_cfg):
+        self.ride_cfg = ride_cfg
+        cmd = [sys.executable, "-u", SIM_RIDE, "--control", "--compose-dir", COMPOSE_DIR]
+        self.state.add_log("demo", datetime.now().isoformat(), "$ " + " ".join(cmd))
+        self.t_start, self.paused = time.time(), False
+        try:
+            self.proc = subprocess.Popen(cmd, cwd=ROOT, stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                         text=True, errors="replace", bufsize=1)
+        except OSError as e:
+            self.state.add_log("demo", datetime.now().isoformat(), f"[dashboard] {e}")
+            self.proc = None
+            return
+        threading.Thread(target=self._pump, args=(self.proc,), daemon=True).start()
+
+    def _pump(self, proc):
+        for line in proc.stdout:
+            self.state.add_log("demo", datetime.now().isoformat(), clean_line(line))
+        self.state.add_log("demo", datetime.now().isoformat(),
+                           f"[dashboard] sim_ride.py exited ({proc.wait()})")
+
+    def command(self, action):
+        """'play' or 'pause'; False if no ride is running."""
+        with self.lock:
+            if self.proc is None or self.proc.poll() is not None:
+                return False
+            try:
+                self.proc.stdin.write(action + "\n")
+                self.proc.stdin.flush()
+            except OSError:
+                return False
+            self.paused = action == "pause"
+            with self.state.lock:
+                self.state.demo = dict(self.state.demo, paused=self.paused)
+            return True
 
 
 def geometry_info():
@@ -417,7 +702,7 @@ def geometry_info():
 # --------------------------------------------------------------------------
 # HTTP
 # --------------------------------------------------------------------------
-def make_handler(state):
+def make_handler(state, allowed_hosts, demo):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -425,9 +710,15 @@ def make_handler(state):
             log.debug("%s " + fmt, self.address_string(), *args)
 
         def _host_ok(self):
-            # Localhost only, also against DNS rebinding (Host: evil.example)
-            host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]")
-            return host in ("localhost", "127.0.0.1", "::1")
+            # Against DNS rebinding (Host: evil.example): accept IP addresses
+            # and this machine's own names only
+            host = (self.headers.get("Host") or "").strip()
+            host = host[1:host.find("]")] if host.startswith("[") else host.rsplit(":", 1)[0]
+            try:
+                ipaddress.ip_address(host)
+                return True
+            except ValueError:
+                return host.lower() in allowed_hosts
 
         def _send(self, code, body, ctype="application/json"):
             if isinstance(body, (dict, list)):
@@ -443,7 +734,8 @@ def make_handler(state):
 
         def do_GET(self):
             if not self._host_ok():
-                return self._send(403, {"error": "localhost only"})
+                return self._send(403, {"error": "unknown Host; open the dashboard "
+                                                 "by IP or add --allow-host"})
             url = urlparse(self.path)
             q = parse_qs(url.query)
             if url.path == "/":
@@ -469,13 +761,29 @@ def make_handler(state):
             # preflight, which this server never grants
             if not self._host_ok() or self.headers.get("X-Guardtwin") != "1":
                 return self._send(403, {"error": "forbidden"})
-            if urlparse(self.path).path != "/api/apply":
+            path = urlparse(self.path).path
+            if path not in ("/api/apply", "/api/demo", "/api/record"):
                 return self._send(404, {"error": "not found"})
             try:
                 n = int(self.headers.get("Content-Length") or 0)
                 doc = json.loads(self.rfile.read(n))
             except ValueError:
                 return self._send(400, {"error": "bad JSON"})
+            if path == "/api/record":
+                if doc.get("action") not in ("start", "stop"):
+                    return self._send(400, {"error": "action: start or stop"})
+                try:
+                    set_recording(state, doc["action"] == "start")
+                except OSError as e:
+                    return self._send(500, {"error": f"cannot write recordings/control.json: {e}"})
+                with state.lock:
+                    return self._send(200, {"ok": True, "recording": state.health["recording"]})
+            if path == "/api/demo":
+                if doc.get("action") not in ("play", "pause"):
+                    return self._send(400, {"error": "action: play or pause"})
+                if not demo.command(doc["action"]):
+                    return self._send(409, {"error": "the demo ride is not running"})
+                return self._send(200, {"ok": True})
             with state.lock:
                 busy = state.job["running"]
             if busy:
@@ -483,6 +791,9 @@ def make_handler(state):
             clean, errors = validate(doc.get("values") or {})
             if errors:
                 return self._send(400, {"errors": errors})
+            if "DEMO_MODE" in clean and bool(clean["DEMO_MODE"]) != \
+                    bool(effective_settings().get("DEMO_MODE")):
+                clean.update(demo_core_env(bool(clean["DEMO_MODE"])))
             write_env(clean)
             threading.Thread(target=run_compose, args=(state, bool(doc.get("rebuild"))),
                              daemon=True).start()
@@ -505,7 +816,7 @@ def make_handler(state):
                 rows = [r for r in state.logs
                         if r[0] > after and (not srcs or r[1] in srcs)]
                 seq = state.log_seq
-            return {"seq": seq, "lines": rows[-limit:]}
+            return {"boot": BOOT_ID, "seq": seq, "lines": rows[-limit:]}
 
         def _stream(self):
             self.send_response(200)
@@ -533,7 +844,14 @@ def make_handler(state):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.strip().splitlines()[0])
+    ap.add_argument("--host", default="0.0.0.0",
+                    help="address to listen on (default: all interfaces; "
+                         "127.0.0.1 for localhost only)")
     ap.add_argument("--port", type=int, default=8095)
+    ap.add_argument("--allow-host", action="append", default=[],
+                    help="extra host name the page may be opened by (it "
+                         "always accepts IP addresses, localhost and this "
+                         "machine's name); repeatable")
     ap.add_argument("--broker-port", type=int, default=None,
                     help="broker stream to show (default: the compose "
                          "ESCALATOR_SERVE_PORT), e.g. a local test broker")
@@ -543,15 +861,23 @@ def main():
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
     logging.getLogger("envelope_location").setLevel(logging.WARNING)
 
+    global COMPOSE_DIR
+    COMPOSE_DIR = host_root()
+    log.info("compose runs from %s", COMPOSE_DIR)
     state = State()
     workers = [(broker_tap, (args.broker_port,)), (envelope_poller, ()), (health_poller, ())]
+    seed_devices(state, CONTAINERS["escalator"])
     workers += [(log_follower, (src, name)) for src, name in CONTAINERS.items()]
     for fn, extra in workers:
         threading.Thread(target=fn, args=(state, *extra), daemon=True).start()
+    demo = Demo(state)
+    threading.Thread(target=demo.run, daemon=True).start()
 
-    httpd = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(state))
+    allowed = {"localhost", socket.gethostname().lower(), socket.getfqdn().lower()}
+    allowed |= {h.lower() for h in args.allow_host}
+    httpd = ThreadingHTTPServer((args.host, args.port), make_handler(state, allowed, demo))
     httpd.daemon_threads = True
-    log.info("dashboard on http://127.0.0.1:%d (forward this port to open it)", args.port)
+    log.info("dashboard on http://%s:%d", args.host, args.port)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

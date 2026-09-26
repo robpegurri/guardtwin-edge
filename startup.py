@@ -1,13 +1,13 @@
 """
     STARTUP ORCHESTRATOR WORKFLOW
 
-    Phase 1 -- AoI Creation: start with health-check to ENVELOPE Devices
-    Location APIs (envelope_location.py), then create the AoI and subscribe.
+    Phase 1 -- health-check of the ENVELOPE Devices Location APIs
+    (envelope_location.py). The AoI subscription is escalator.py's, which
+    uses its callbacks to track the devices in the AoI.
 
     Phase 2 -- wait for the sensing bike to appear: the bike is
     whoever sends the first radar UDP frame to broker.py's --listen-port;
-    its source IP is logged as the sensing node found, supervision is triggered
-    as soon as it enters the AoI (by API subscription callback).
+    its source IP is logged as the sensing node found.
 
     Phase 3 -- supervision: as implemented in broker.py. This script
     launches it unchanged with whatever extra arguments were given on the
@@ -21,7 +21,6 @@ import signal
 import socket
 import subprocess
 import sys
-import threading
 
 import envelope_location as loc
 
@@ -65,12 +64,6 @@ def main():
                     help="area of interest center longitude")
     ap.add_argument("--aoi-radius", type=float, default=150,
                     help="area of interest radius in meters")
-    ap.add_argument("--notify-port", type=int, default=8080,
-                    help="local port for the ENVELOPE subscription callback")
-    ap.add_argument("--notify-host", default=None,
-                    help="externally-reachable host/IP ENVELOPE should call "
-                         "back on; required when running in a container "
-                         "behind published ports (auto-detected otherwise)")
     ap.add_argument("--skip-device-detect", action="store_true",
                     help="bypass phase 2 and go straight to phase 3 (supervision)")
     ap.add_argument("--detect-timeout-s", type=float, default=0,
@@ -89,65 +82,43 @@ def main():
         ap.error("no broker.py arguments given (e.g. --imsi ...); "
                  "unrecognized arguments are forwarded to it as-is")
 
-    area = loc.area(args.aoi_lat, args.aoi_lon, args.aoi_radius)
-
     log.info("Startup Phase 1: checking ENVELOPE Devices Location APIs health...")
     loc.wait_alive()
 
     # `docker stop` (also run by `docker compose up` when the settings change)
     # sends SIGTERM to this process: make it a normal exit, so that the
-    # finally below stops the broker and unsubscribes. Python's default would
-    # die on the spot, leaving the subscription behind at ENVELOPE.
+    # finally below stops the broker. Python's default would die on the spot.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
-    events, sink, stop = loc.start_receiver(args.notify_port, args.notify_host)
+    if args.skip_device_detect:
+        log.info("Startup Phase 2: skipped (--skip-device-detect)")
+    else:
+        listen_host, listen_port = peek_listen_addr(broker_args)
+        log.info("Startup Phase 2: waiting for the first radar frame on udp://%s:%d",
+                 listen_host, listen_port)
+        node = wait_for_radar_frame(listen_host, listen_port, args.detect_timeout_s)
+        if node is None:
+            log.error("Startup Phase 2: no radar frame received within timeout")
+            return 1
+
+    broker_py = args.broker_py or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "broker.py")
+
+    # broker.py gets the AoI too, so it can drop frames from outside it
+    aoi_args = ["--aoi-lat", str(args.aoi_lat),
+               "--aoi-lon", str(args.aoi_lon),
+               "--aoi-radius", str(args.aoi_radius)]
+    log.info("Startup Phase 3: starting supervision (%s)...", broker_py)
+    broker = subprocess.Popen([sys.executable, broker_py, *aoi_args, *broker_args])
     try:
-        loc.unsubscribe_sink(sink)       # leftovers of runs that could not clean up
-    except Exception as e:
-        log.warning("could not check for leftover subscriptions (%s)", e)
-    sub = loc.subscribe(area, sink)
-
-    def drain_events():
-        while True:
-            events.get()
-    threading.Thread(target=drain_events, daemon=True).start()
-
-    try:
-        if args.skip_device_detect:
-            log.info("Startup Phase 2: skipped (--skip-device-detect)")
-        else:
-            listen_host, listen_port = peek_listen_addr(broker_args)
-            log.info("Startup Phase 2: waiting for the first radar frame on udp://%s:%d",
-                     listen_host, listen_port)
-            node = wait_for_radar_frame(listen_host, listen_port, args.detect_timeout_s)
-            if node is None:
-                log.error("Startup Phase 2: no radar frame received within timeout")
-                return 1
-
-        broker_py = args.broker_py or os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "broker.py")
-
-        # Note: broker.py gets the same AoI as the phase 1 subscription, so it can drop frames from outside it
-        aoi_args = ["--aoi-lat", str(args.aoi_lat),
-                   "--aoi-lon", str(args.aoi_lon),
-                   "--aoi-radius", str(args.aoi_radius)]
-        log.info("Startup Phase 3: starting supervision (%s)...", broker_py)
-        broker = subprocess.Popen([sys.executable, broker_py, *aoi_args, *broker_args])
-        try:
-            return broker.wait()
-        finally:
-            if broker.poll() is None:            # we are being stopped
-                broker.terminate()
-                try:
-                    broker.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    broker.kill()
+        return broker.wait()
     finally:
-        try:
-            loc.unsubscribe(sub)
-        except Exception as e:
-            log.warning("could not unsubscribe %s (%s)", sub, e)
-        stop()
+        if broker.poll() is None:            # we are being stopped
+            broker.terminate()
+            try:
+                broker.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                broker.kill()
 
 
 if __name__ == "__main__":

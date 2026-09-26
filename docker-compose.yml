@@ -9,16 +9,14 @@ services:
         ports:
             - "${UDP_INGEST_PORT:-30491}:${UDP_INGEST_PORT:-30491}/udp"
             - "${ESCALATOR_SERVE_PORT:-30500}:${ESCALATOR_SERVE_PORT:-30500}/tcp"
-            - "${NOTIFY_PORT:-8081}:${NOTIFY_PORT:-8081}/tcp"
         volumes:
             - "${GEOMETRY_FILE_HOST:-./files/geometry.geojson}:/app/geometry.geojson:ro"
+            - "./recordings:/app/recordings"      # Record button: raw inputs (recorder.py)
         command: >
             ${VERBOSE:+-v}
             --aoi-lat ${AOI_LAT:-45.06413361104026}
             --aoi-lon ${AOI_LON:-7.6598566324570925}
             --aoi-radius ${AOI_RADIUS:-150}
-            --notify-port ${NOTIFY_PORT:-8081}
-            --notify-host ${NOTIFY_HOST:-192.168.0.128}
             ${SKIP_DEVICE_DETECT:+--skip-device-detect}
             --imsi ${IMSI:-001010000167802}
             --listen-port ${UDP_INGEST_PORT:-30491}
@@ -26,8 +24,8 @@ services:
             --resolver-url ${RESOLVER_URL:-http://10.211.1.140:18080}
             --metrics-url ${METRICS_URL:-http://10.211.1.140:8080}
             --gnb-id f01
-            --chan-penalty-max ${CHAN_PENALTY_MAX:-3.0}
-            --ai-context-max ${AI_CONTEXT_MAX:-2.0}
+            --chan-penalty-max ${CHAN_PENALTY_MAX:-2.0}
+            --ai-context-max ${AI_CONTEXT_MAX:-3.0}
             --llm-url http://vllm:8000
             --llm-model ${LLM_MODEL:-google/gemma-4-12B-it-qat-w4a16-ct}
             --llm-retry-s ${LLM_RETRY_S:-1.0}
@@ -36,6 +34,7 @@ services:
             --geometry-file /app/geometry.geojson
             ${LLM_DISABLE:+--llm-disable}
             ${LLM_CLOCK:+--llm-clock ${LLM_CLOCK}}
+            --record-dir /app/recordings
 
     escalator:
         build: .
@@ -45,6 +44,11 @@ services:
         entrypoint: ["python3", "-u", "escalator.py"]
         depends_on:
             - broker
+        ports:
+            # ENVELOPE subscription callbacks (device list, see escalator.py)
+            - "${NOTIFY_PORT:-8081}:${NOTIFY_PORT:-8081}/tcp"
+        volumes:
+            - "./recordings:/app/recordings"      # Record button: raw inputs (recorder.py)
         command: >
             ${VERBOSE:+-v}
             --host broker
@@ -53,10 +57,13 @@ services:
             --aoi-lon ${AOI_LON:-7.6598566324570925}
             --aoi-radius ${AOI_RADIUS:-150}
             --devices-max-age-s ${DEVICES_MAX_AGE_S:-1}
+            --notify-port ${NOTIFY_PORT:-8081}
+            --notify-host ${NOTIFY_HOST:-192.168.0.128}
             ${AOI_ID:+--aoi-id ${AOI_ID}}
             --risk-escalation-url ${RISK_ESCALATION_URL:-http://192.168.0.174:30090}
             --evaluator-token ${EVALUATOR_BEARER_TOKEN:-devsecret_replace_in_deployment_evaluator_token}
             --risk-escalator-aoi-id ${AOI_ID:-turin-masa-aoi-1}
+            --record-dir /app/recordings
 
     vllm:
         image: vllm/vllm-openai:v0.30.0
@@ -84,6 +91,24 @@ services:
                           count: 1
                           capabilities: [gpu]
         shm_size: "2gb"
+
+    # Debug dashboard (dashboard/dashboard.py) on http://<server-ip>:8095,
+    # open to the LAN on purpose: its Settings tab writes .env and runs
+    # `docker compose up -d broker escalator`, hence the docker socket.
+    dashboard:
+        build: ./dashboard
+        image: guardtwin-dashboard:latest
+        container_name: guardtwin-dashboard
+        restart: unless-stopped
+        network_mode: host      # broker stream on 127.0.0.1, LAN on the host's IPs
+        working_dir: /guardtwin-edge
+        environment:
+            DASHBOARD_CONTAINER: guardtwin-dashboard
+        volumes:
+            - ".:/guardtwin-edge"
+            - "/var/run/docker.sock:/var/run/docker.sock"
+        command: >
+            --port ${DASHBOARD_PORT:-8095}
 
 volumes:
     vllm-cache:
